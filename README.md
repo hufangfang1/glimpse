@@ -31,6 +31,33 @@ python -m pip install -r requirements.txt
 
 ## 运行
 
+### 方式一：macOS 应用（推荐）
+
+**首次**（安装依赖 + 生成 `.app`）：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+bash scripts/build_app.sh
+```
+
+**日常启动**：双击项目里的 **`Proxyman.app`** 即可。
+
+**固定到「应用程序」或启动台**（不要用 Finder 把 `.app` 拖进去复制）：
+
+```bash
+bash scripts/install_app.sh
+```
+
+这会在「应用程序」里创建一个**快捷方式**，指向项目内的 `Proxyman.app`。
+
+> **不要**把 `Proxyman.app` **复制**到「应用程序」——复制后往往打不开。  
+> 若已经复制过，先删 `/Applications/Proxyman.app`，再运行 `install_app.sh`。  
+> 首次打开若被 macOS 拦截：「系统设置 → 隐私与安全性 → 仍要打开」。
+
+### 方式二：命令行
+
 ```bash
 source .venv/bin/activate   # 若尚未激活虚拟环境
 python main.py
@@ -63,6 +90,9 @@ python main.py
 ```
 proxyman/
 ├── main.py                    # 入口
+├── Proxyman.app               # 运行 build_app.sh 后生成，双击启动
+├── scripts/build_app.sh       # 打包 macOS 应用
+├── assets/AppIcon.png         # 应用图标
 ├── requirements.txt
 ├── proxy/
 │   ├── models.py              # FlowModel 数据模型
