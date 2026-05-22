@@ -1,0 +1,4 @@
+mitmproxy>=9.0.0,<12.0.0
+PyQt6>=6.4.0
+httpx>=0.24.0
+brotli>=1.0.0
