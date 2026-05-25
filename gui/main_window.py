@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Proxyman — HTTP Debugger")
+        self.setWindowTitle("Glimpse — HTTP Debugger")
         self.resize(1280, 780)
 
         self._server = ProxyServer(port=9090, scope=Scope.load())

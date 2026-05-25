@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Proxyman — HTTP/HTTPS debugging proxy
+Glimpse — HTTP/HTTPS debugging proxy
 Entry point
 """
 import os
@@ -22,9 +22,9 @@ def main() -> None:
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Proxyman")
+    app.setApplicationName("Glimpse")
     app.setApplicationVersion("0.1.0")
-    app.setOrganizationName("proxyman")
+    app.setOrganizationName("glimpse")
 
     window = MainWindow()
     window.show()

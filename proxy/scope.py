@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
-SCOPE_FILE = Path.home() / ".proxyman" / "scope.json"
+SCOPE_FILE = Path.home() / ".glimpse" / "scope.json"
+# Pre-rename location — loaded transparently so existing users don't lose
+# their config when the app is renamed.
+LEGACY_SCOPE_FILE = Path.home() / ".proxyman" / "scope.json"
 
 
 @dataclass
@@ -135,6 +138,9 @@ class Scope:
     @classmethod
     def load(cls, path: Path = SCOPE_FILE) -> "Scope":
         scope = cls()
+        # Fall back to legacy path so configs survive the rename.
+        if not path.exists() and LEGACY_SCOPE_FILE.exists():
+            path = LEGACY_SCOPE_FILE
         if not path.exists():
             return scope
         try:

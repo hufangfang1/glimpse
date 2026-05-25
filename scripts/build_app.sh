@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build Proxyman.app — double-click launcher for macOS (Dock / Launchpad).
+# Build Glimpse.app — double-click launcher for macOS (Dock / Launchpad).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="Proxyman"
+APP_NAME="Glimpse"
 APP_DIR="$ROOT/$APP_NAME.app"
 ICON_SRC="$ROOT/assets/AppIcon.png"
 ICONSET="$ROOT/assets/AppIcon.iconset"
@@ -14,16 +14,27 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 # --- App icon (.icns) ---
+# We previously used `sips` + `iconutil`, but macOS sandboxing stamps
+# `com.apple.provenance` on sips' output, which iconutil rejects with
+# "Invalid Iconset". Pillow can emit a valid .icns directly and is already
+# a project dependency.
 if [[ -f "$ICON_SRC" ]]; then
-  rm -rf "$ICONSET"
-  mkdir -p "$ICONSET"
-  for size in 16 32 128 256 512; do
-    sips -z $size $size "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-    double=$((size * 2))
-    sips -z $double $double "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-  done
-  iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
-  rm -rf "$ICONSET"
+  PYTHON_BUILD="$ROOT/.venv/bin/python"
+  if [[ ! -x "$PYTHON_BUILD" ]]; then
+    PYTHON_BUILD="$(command -v python3 || command -v python)"
+  fi
+  "$PYTHON_BUILD" - "$ICON_SRC" "$APP_DIR/Contents/Resources/AppIcon.icns" <<'PY'
+import sys
+from PIL import Image
+
+src, dst = sys.argv[1], sys.argv[2]
+img = Image.open(src).convert("RGBA")
+img.save(
+    dst,
+    format="ICNS",
+    sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)],
+)
+PY
 else
   echo "  (warning: $ICON_SRC not found, skipping icon)"
 fi
@@ -32,18 +43,18 @@ fi
 cat > "$APP_DIR/Contents/MacOS/$APP_NAME" << LAUNCHER
 #!/bin/bash
 PROJECT_DIR="$ROOT"
-LOG_FILE="\$HOME/Library/Logs/Proxyman.log"
+LOG_FILE="\$HOME/Library/Logs/Glimpse.log"
 PYTHON="\$PROJECT_DIR/.venv/bin/python"
 
 mkdir -p "\$HOME/Library/Logs"
 
 if [[ ! -f "\$PROJECT_DIR/main.py" ]]; then
-  osascript -e 'display alert "Proxyman" message "找不到项目目录。\n\n请勿把 Proxyman.app 复制到「应用程序」。\n请在项目里运行:\n\nbash scripts/install_app.sh" as critical' 2>/dev/null
+  osascript -e 'display alert "Glimpse" message "找不到项目目录。\n\n请勿把 Glimpse.app 复制到「应用程序」。\n请在项目里运行:\n\nbash scripts/install_app.sh" as critical' 2>/dev/null
   exit 1
 fi
 
 if [[ ! -x "\$PYTHON" ]]; then
-  osascript -e 'display alert "Proxyman" message "未找到虚拟环境。\n\n请在项目目录执行:\n\npython3 -m venv .venv\nsource .venv/bin/activate\npip install -r requirements.txt" as critical' 2>/dev/null
+  osascript -e 'display alert "Glimpse" message "未找到虚拟环境。\n\n请在项目目录执行:\n\npython3 -m venv .venv\nsource .venv/bin/activate\npip install -r requirements.txt" as critical' 2>/dev/null
   exit 1
 fi
 
@@ -60,7 +71,7 @@ fi
 "\${RUNNER[@]}" "\$PYTHON" "\$PROJECT_DIR/main.py" 2>>"\$LOG_FILE"
 code=\$?
 if [[ \$code -ne 0 ]]; then
-  osascript -e 'display alert "Proxyman" message "启动失败，详见日志:\n~/Library/Logs/Proxyman.log" as critical' 2>/dev/null
+  osascript -e 'display alert "Glimpse" message "启动失败，详见日志:\n~/Library/Logs/Glimpse.log" as critical' 2>/dev/null
 fi
 exit \$code
 LAUNCHER
@@ -75,15 +86,15 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleDevelopmentRegion</key>
     <string>zh-Hans</string>
     <key>CFBundleExecutable</key>
-    <string>Proxyman</string>
+    <string>Glimpse</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>com.proxyman.app</string>
+    <string>com.glimpse.app</string>
     <key>CFBundleName</key>
-    <string>Proxyman</string>
+    <string>Glimpse</string>
     <key>CFBundleDisplayName</key>
-    <string>Proxyman</string>
+    <string>Glimpse</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

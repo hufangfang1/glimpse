@@ -1,5 +1,5 @@
 """
-Flow data models for Proxyman.
+Flow data models for Glimpse.
 """
 from __future__ import annotations
 

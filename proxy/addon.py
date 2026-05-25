@@ -15,7 +15,7 @@ from .models import FlowModel, WSMessage
 from .scope import Scope
 
 
-class ProxymanAddon:
+class GlimpseAddon:
     """Mitmproxy addon that bridges captured flows to the GUI queue."""
 
     def __init__(self, flow_queue: Queue, scope: Scope | None = None) -> None:

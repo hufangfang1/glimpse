@@ -1,5 +1,5 @@
 """
-Dark theme stylesheet — Proxyman-inspired.
+Dark theme stylesheet — Glimpse.
 """
 
 DARK = """

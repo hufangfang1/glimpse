@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from queue import Queue
 
-from .addon import ProxymanAddon
+from .addon import GlimpseAddon
 from .scope import Scope
 
 
@@ -28,7 +28,7 @@ class ProxyServer:
         self.flow_queue: Queue = Queue()
         self.scope = scope or Scope()
         self._master = None
-        self._addon: ProxymanAddon | None = None
+        self._addon: GlimpseAddon | None = None
         self.running = False
         self._stop_event = threading.Event()
         self._generation: int = 0
@@ -210,7 +210,7 @@ class ProxyServer:
                 opts.ignore_hosts = block_re
 
             master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-            addon = ProxymanAddon(self.flow_queue, scope=self.scope)
+            addon = GlimpseAddon(self.flow_queue, scope=self.scope)
             self._addon = addon
             master.addons.add(addon)
             self._master = master
