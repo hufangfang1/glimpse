@@ -27,10 +27,12 @@ from PyQt6.QtWidgets import (
 )
 
 from proxy.models import FlowModel
+from proxy.scope import Scope
 from proxy.server import ProxyServer
 from gui.themes import DARK
 from gui.widgets.traffic_table import TrafficTable
 from gui.widgets.detail_panel import DetailPanel
+from gui.widgets.scope_dialog import ScopeDialog
 
 MAX_CAPTURED_FLOWS = 2000
 
@@ -42,7 +44,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Proxyman — HTTP Debugger")
         self.resize(1280, 780)
 
-        self._server = ProxyServer(port=9090)
+        self._server = ProxyServer(port=9090, scope=Scope.load())
         self._flows: Dict[str, FlowModel] = {}
         self._selected_flow_id: Optional[str] = None
 
@@ -93,6 +95,17 @@ class MainWindow(QMainWindow):
         self._filter_input.setFixedWidth(220)
         self._filter_input.textChanged.connect(self._on_filter_changed)
 
+        self._btn_replay = QPushButton("↩  Replay")
+        self._btn_replay.setFixedWidth(96)
+        self._btn_replay.setEnabled(False)
+        self._btn_replay.setToolTip("Replay the selected request  (⇧⌘R)")
+        self._btn_replay.clicked.connect(self._replay_selected)
+
+        self._btn_scope = QPushButton("🎯 Scope")
+        self._btn_scope.setFixedWidth(90)
+        self._btn_scope.setToolTip("Edit allow / block host patterns  (⌘L)")
+        self._btn_scope.clicked.connect(self._edit_scope)
+
         btn_cert = QPushButton("🔐 Install Cert")
         btn_cert.setFixedWidth(110)
         btn_cert.setToolTip("Install mitmproxy CA certificate into macOS system keychain")
@@ -105,6 +118,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._port_spin)
         tb.addSeparator()
         tb.addWidget(btn_clear)
+        tb.addWidget(self._btn_replay)
         tb.addSeparator()
         tb.addWidget(filter_label)
         tb.addWidget(self._filter_input)
@@ -112,12 +126,17 @@ class MainWindow(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
+        tb.addWidget(self._btn_scope)
         tb.addWidget(btn_cert)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._traffic_table = TrafficTable()
         self._traffic_table.flow_selected.connect(self._on_flow_selected)
+        self._traffic_table.replay_requested.connect(self._replay_flow)
+        self._traffic_table.delete_requested.connect(self._delete_flow)
+        self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
+        self._traffic_table.scope_add_requested.connect(self._add_to_scope)
 
         self._detail_panel = DetailPanel()
         self._detail_panel.replay_requested.connect(self._replay_flow)
@@ -132,13 +151,19 @@ class MainWindow(QMainWindow):
         self._sb_status = QLabel("● Stopped")
         self._sb_status.setStyleSheet("color: #f38ba8;")
         self._sb_count = QLabel("0 requests")
+        self._sb_scope = QLabel("")
+        self._sb_scope.setStyleSheet("color: #f9e2af;")
         self._sb_addr = QLabel("")
 
         sb = self.statusBar()
         sb.addWidget(self._sb_status)
         sb.addWidget(QLabel("   "))
         sb.addWidget(self._sb_count)
+        sb.addWidget(QLabel("   "))
+        sb.addWidget(self._sb_scope)
         sb.addPermanentWidget(self._sb_addr)
+
+        self._update_scope_status()
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -165,6 +190,27 @@ class MainWindow(QMainWindow):
         act_clear.setShortcut(QKeySequence("Meta+K"))
         act_clear.triggered.connect(self._clear_traffic)
         edit_menu.addAction(act_clear)
+
+        act_replay = QAction("Replay Selected", self)
+        act_replay.setShortcut(QKeySequence("Meta+Shift+R"))
+        act_replay.triggered.connect(self._replay_selected)
+        edit_menu.addAction(act_replay)
+
+        act_copy_url = QAction("Copy URL", self)
+        act_copy_url.setShortcut(QKeySequence("Meta+Shift+C"))
+        act_copy_url.triggered.connect(self._copy_selected_url)
+        edit_menu.addAction(act_copy_url)
+
+        act_copy_curl = QAction("Copy as cURL", self)
+        act_copy_curl.setShortcut(QKeySequence("Meta+Alt+C"))
+        act_copy_curl.triggered.connect(self._copy_selected_curl)
+        edit_menu.addAction(act_copy_curl)
+
+        edit_menu.addSeparator()
+        act_scope = QAction("Capture Scope…", self)
+        act_scope.setShortcut(QKeySequence("Meta+L"))
+        act_scope.triggered.connect(self._edit_scope)
+        edit_menu.addAction(act_scope)
 
         help_menu = menu.addMenu("Help")
         act_setup = QAction("Setup Instructions", self)
@@ -300,6 +346,99 @@ class MainWindow(QMainWindow):
     def _on_flow_selected(self, flow: Optional[FlowModel]) -> None:
         self._selected_flow_id = flow.id if flow else None
         self._detail_panel.load(flow)
+        self._btn_replay.setEnabled(flow is not None)
+
+    def _apply_host_filter(self, host: str) -> None:
+        self._filter_input.setText(host)
+
+    def _delete_flow(self, flow: FlowModel) -> None:
+        self._traffic_table.remove_flow(flow.id)
+        self._flows.pop(flow.id, None)
+        if self._selected_flow_id == flow.id:
+            self._selected_flow_id = None
+            self._detail_panel.load(None)
+            self._btn_replay.setEnabled(False)
+        self._update_count()
+
+    def _selected_flow(self) -> Optional[FlowModel]:
+        if self._selected_flow_id is None:
+            return None
+        return self._flows.get(self._selected_flow_id)
+
+    def _replay_selected(self) -> None:
+        flow = self._selected_flow()
+        if flow is not None:
+            self._replay_flow(flow)
+
+    def _copy_selected_url(self) -> None:
+        flow = self._selected_flow()
+        if flow is not None:
+            self._copy_clipboard(flow.url)
+
+    def _copy_selected_curl(self) -> None:
+        flow = self._selected_flow()
+        if flow is not None:
+            self._copy_clipboard(flow.to_curl())
+
+    @staticmethod
+    def _copy_clipboard(text: str) -> None:
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text or "")
+
+    # ------------------------------------------------------------------ #
+    # Capture scope
+    # ------------------------------------------------------------------ #
+
+    def _edit_scope(self) -> None:
+        allow, block = self._server.scope.snapshot()
+        dlg = ScopeDialog(allow=allow, block=block, parent=self)
+        dlg.set_apply_callback(self._apply_scope)
+        dlg.exec()
+
+    def _apply_scope(self, allow, block) -> None:
+        self._server.set_scope(allow=allow, block=block)
+        try:
+            self._server.scope.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Scope 保存失败: {exc}", 5000)
+        self._update_scope_status()
+
+    def _add_to_scope(self, action: str, pattern: str) -> None:
+        """Append a host pattern to allow/block list (from right-click menu)."""
+        pattern = (pattern or "").strip()
+        if not pattern:
+            return
+        allow, block = self._server.scope.snapshot()
+        target = allow if action == "allow" else block
+        if pattern.lower() in (p.lower() for p in target):
+            self.statusBar().showMessage(
+                f"'{pattern}' 已在{('白' if action == 'allow' else '黑')}名单中", 3000
+            )
+            return
+        target.append(pattern)
+        self._apply_scope(allow, block)
+        kind = "白" if action == "allow" else "黑"
+        self.statusBar().showMessage(
+            f"已加入{kind}名单：{pattern} · 长连接需让 App 重连后生效", 5000
+        )
+
+    def _update_scope_status(self) -> None:
+        allow, block = self._server.scope.snapshot()
+        if not allow and not block:
+            self._sb_scope.setText("")
+            self._btn_scope.setStyleSheet("")
+            return
+        parts = []
+        if allow:
+            parts.append(f"allow {len(allow)}")
+        if block:
+            parts.append(f"block {len(block)}")
+        self._sb_scope.setText("🎯 " + " · ".join(parts))
+        # subtle visual cue on the toolbar button so users can tell at a glance.
+        self._btn_scope.setStyleSheet(
+            "QPushButton { background-color: #f9e2af; color: #1e1e2e; "
+            "border-color: #f9e2af; font-weight: 600; }"
+        )
 
     def _update_count(self) -> None:
         n = self._traffic_table.count()

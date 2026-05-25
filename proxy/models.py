@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import shlex
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -212,3 +213,45 @@ class FlowModel:
 
     def is_html(self) -> bool:
         return "html" in self.content_type
+
+    # ------------------------------------------------------------------ #
+    # Export helpers
+    # ------------------------------------------------------------------ #
+
+    # Headers we drop when exporting / replaying — they're either recomputed
+    # by curl/httpx, or carry transport-level state that shouldn't be reused.
+    _SKIP_EXPORT_HEADERS = {
+        "content-length",
+        "host",
+        "connection",
+        "proxy-connection",
+        "transfer-encoding",
+    }
+
+    def to_curl(self, multiline: bool = True) -> str:
+        """Render this flow's request as a runnable curl command."""
+        parts: List[str] = ["curl"]
+        if self.method.upper() != "GET":
+            parts.append(f"-X {self.method}")
+        parts.append(shlex.quote(self.url))
+
+        for key, value in self.request_headers.items():
+            if key.lower() in self._SKIP_EXPORT_HEADERS:
+                continue
+            parts.append(f"-H {shlex.quote(f'{key}: {value}')}")
+
+        if self.request_body:
+            try:
+                body_text = self.request_body.decode("utf-8")
+                parts.append(f"--data-raw {shlex.quote(body_text)}")
+            except UnicodeDecodeError:
+                # Binary body — fall back to a base64 pipeline so the command
+                # is still copy-paste runnable in a POSIX shell.
+                import base64
+                b64 = base64.b64encode(self.request_body).decode("ascii")
+                parts.append(
+                    f'--data-binary "$(echo {b64} | base64 -d)"'
+                )
+
+        sep = " \\\n  " if multiline else " "
+        return sep.join(parts)

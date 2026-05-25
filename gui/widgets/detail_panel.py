@@ -9,19 +9,30 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
-from PyQt6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QKeySequence,
+    QPainter,
+    QShortcut,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QSplitter,
     QStackedWidget,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    QPushButton,
-    QHBoxLayout,
-    QFrame,
 )
 
 from proxy.models import FlowModel
@@ -448,6 +459,120 @@ class JsonFoldView(QPlainTextEdit):
         return count
 
 
+class BodyFindBar(QWidget):
+    """Inline find bar for QPlainTextEdit (⌘F style)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._target: Optional[QPlainTextEdit] = None
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Find in body…")
+        self._input.returnPressed.connect(self.find_next)
+        self._input.textChanged.connect(self._on_text_changed)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #6c7086; font-size: 11px;")
+        self._status.setFixedWidth(80)
+        self._status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        btn_prev = QPushButton("↑")
+        btn_prev.setFixedWidth(28)
+        btn_prev.setToolTip("Previous match  (⇧⏎)")
+        btn_prev.clicked.connect(self.find_prev)
+
+        btn_next = QPushButton("↓")
+        btn_next.setFixedWidth(28)
+        btn_next.setToolTip("Next match  (⏎)")
+        btn_next.clicked.connect(self.find_next)
+
+        btn_close = QPushButton("✕")
+        btn_close.setFixedWidth(28)
+        btn_close.setToolTip("Close  (Esc)")
+        btn_close.clicked.connect(self.hide)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+        layout.addWidget(self._input, 1)
+        layout.addWidget(self._status)
+        layout.addWidget(btn_prev)
+        layout.addWidget(btn_next)
+        layout.addWidget(btn_close)
+
+        self.setStyleSheet("background: #181825; border-bottom: 1px solid #313244;")
+        self.hide()
+
+    def set_target(self, edit: Optional[QPlainTextEdit]) -> None:
+        self._target = edit
+        if self.isVisible():
+            self._update_status()
+
+    def show_and_focus(self) -> None:
+        self.show()
+        self._input.setFocus()
+        self._input.selectAll()
+        self._update_status()
+
+    def find_next(self) -> None:
+        self._find(backward=False)
+
+    def find_prev(self) -> None:
+        self._find(backward=True)
+
+    def _find(self, *, backward: bool) -> None:
+        text = self._input.text()
+        if not text or self._target is None:
+            return
+        flags = QTextDocument.FindFlag(0)
+        if backward:
+            flags |= QTextDocument.FindFlag.FindBackward
+        if not self._target.find(text, flags):
+            # Wrap around to the start/end.
+            cursor = self._target.textCursor()
+            cursor.movePosition(
+                QTextCursor.MoveOperation.End if backward else QTextCursor.MoveOperation.Start
+            )
+            self._target.setTextCursor(cursor)
+            self._target.find(text, flags)
+        self._update_status()
+
+    def _on_text_changed(self, text: str) -> None:
+        if not text or self._target is None:
+            self._status.setText("")
+            return
+        # Move cursor to start so the first find lands on the first match.
+        cursor = self._target.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._target.setTextCursor(cursor)
+        self._target.find(text)
+        self._update_status()
+
+    def _update_status(self) -> None:
+        text = self._input.text()
+        if not text or self._target is None:
+            self._status.setText("")
+            return
+        haystack = self._target.toPlainText()
+        # Count is case-sensitive, matching QPlainTextEdit.find's default.
+        count = haystack.count(text)
+        self._status.setText(f"{count} match{'es' if count != 1 else ''}")
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            if self._target is not None:
+                self._target.setFocus()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.find_prev()
+            else:
+                self.find_next()
+            return
+        super().keyPressEvent(event)
+
+
 class BodyPanel(QWidget):
     """Body viewer with collapsible JSON tree and raw text fallback."""
 
@@ -484,35 +609,57 @@ class BodyPanel(QWidget):
         self._btn_collapse.setFixedWidth(96)
         self._btn_collapse.clicked.connect(self._fold.collapse_all)
 
+        self._btn_find = QPushButton("🔍 Find")
+        self._btn_find.setFixedWidth(76)
+        self._btn_find.setToolTip("Find in body  (⌘F)")
+        self._btn_find.clicked.connect(self._show_find)
+
         toolbar.addWidget(self._btn_tree)
         toolbar.addWidget(self._btn_raw)
         toolbar.addSpacing(8)
         toolbar.addWidget(self._btn_expand)
         toolbar.addWidget(self._btn_collapse)
         toolbar.addStretch()
+        toolbar.addWidget(self._btn_find)
 
         self._toolbar = QWidget()
         self._toolbar.setLayout(toolbar)
         self._toolbar.setStyleSheet("background: #181825; border-bottom: 1px solid #313244;")
 
+        self._find_bar = BodyFindBar()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._toolbar)
+        layout.addWidget(self._find_bar)
         layout.addWidget(self._stack, 1)
-        self._toolbar.hide()
+
+        # ⌘F anywhere inside the body panel pops the find bar. ApplicationShortcut
+        # would be too broad; WidgetWithChildrenShortcut is the right scope.
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._show_find)
 
     def set_body(self, text: str, is_json: bool = False) -> None:
         self._is_json = is_json
         self._text.set_body(text, is_json=is_json)
 
-        if is_json and self._fold.load_json(text):
-            self._toolbar.show()
-            self._set_mode(tree=True)
-            return
+        json_loaded = is_json and self._fold.load_json(text)
 
-        self._toolbar.hide()
-        self._stack.setCurrentWidget(self._text)
+        # Tree/Raw/Expand/Collapse only make sense for JSON; Find always available.
+        for btn in (self._btn_tree, self._btn_raw, self._btn_expand, self._btn_collapse):
+            btn.setVisible(json_loaded)
+
+        self._toolbar.show()
+        if json_loaded:
+            self._set_mode(tree=True)
+        else:
+            self._stack.setCurrentWidget(self._text)
+
+        # Hide find bar between flows; user can re-open with ⌘F.
+        self._find_bar.hide()
+        self._sync_find_target()
 
     def _set_mode(self, tree: bool) -> None:
         if not self._is_json:
@@ -520,6 +667,16 @@ class BodyPanel(QWidget):
         self._btn_tree.setChecked(tree)
         self._btn_raw.setChecked(not tree)
         self._stack.setCurrentWidget(self._fold if tree else self._text)
+        self._sync_find_target()
+
+    def _show_find(self) -> None:
+        self._sync_find_target()
+        self._find_bar.show_and_focus()
+
+    def _sync_find_target(self) -> None:
+        current = self._stack.currentWidget()
+        if isinstance(current, QPlainTextEdit):
+            self._find_bar.set_target(current)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

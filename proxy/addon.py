@@ -12,17 +12,30 @@ from urllib.parse import urlparse
 from mitmproxy import http
 
 from .models import FlowModel, WSMessage
+from .scope import Scope
 
 
 class ProxymanAddon:
     """Mitmproxy addon that bridges captured flows to the GUI queue."""
 
-    def __init__(self, flow_queue: Queue) -> None:
+    def __init__(self, flow_queue: Queue, scope: Scope | None = None) -> None:
         self.flow_queue = flow_queue
+        self.scope = scope or Scope()
         self._start_times: Dict[str, float] = {}
 
     def clear(self) -> None:
         self._start_times.clear()
+
+    # ------------------------------------------------------------------ #
+    # Scope filter
+    # ------------------------------------------------------------------ #
+
+    def _in_scope(self, flow: http.HTTPFlow) -> bool:
+        try:
+            host = flow.request.pretty_host or ""
+        except Exception:
+            return True
+        return self.scope.accepts(host)
 
     # ------------------------------------------------------------------ #
     # HTTP hooks
@@ -32,6 +45,9 @@ class ProxymanAddon:
         self._start_times[flow.id] = time.perf_counter()
 
     def response(self, flow: http.HTTPFlow) -> None:
+        if not self._in_scope(flow):
+            self._start_times.pop(flow.id, None)
+            return
         try:
             duration = time.perf_counter() - self._start_times.pop(flow.id, time.perf_counter())
             model = self._build_model(flow, duration)
@@ -40,6 +56,9 @@ class ProxymanAddon:
             self.flow_queue.put(("error", f"Capture error: {exc}"))
 
     def error(self, flow: http.HTTPFlow) -> None:
+        if not self._in_scope(flow):
+            self._start_times.pop(flow.id, None)
+            return
         try:
             duration = time.perf_counter() - self._start_times.pop(flow.id, time.perf_counter())
             model = self._build_model(flow, duration)
@@ -53,6 +72,8 @@ class ProxymanAddon:
     # ------------------------------------------------------------------ #
 
     def websocket_start(self, flow: http.HTTPFlow) -> None:
+        if not self._in_scope(flow):
+            return
         try:
             self._start_times[flow.id] = time.perf_counter()
             model = self._build_model(flow, 0.0, flow_type="websocket")
@@ -61,6 +82,8 @@ class ProxymanAddon:
             self.flow_queue.put(("error", f"Capture error: {exc}"))
 
     def websocket_message(self, flow: http.HTTPFlow) -> None:
+        if not self._in_scope(flow):
+            return
         assert flow.websocket is not None
         msg = flow.websocket.messages[-1]
         ws_msg = WSMessage(
@@ -70,6 +93,8 @@ class ProxymanAddon:
         self.flow_queue.put(("ws_message", flow.id, ws_msg))
 
     def websocket_end(self, flow: http.HTTPFlow) -> None:
+        if flow.id not in self._start_times:
+            return
         duration = time.perf_counter() - self._start_times.pop(flow.id, time.perf_counter())
         self.flow_queue.put(("ws_end", flow.id, duration))
 

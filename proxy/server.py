@@ -12,6 +12,7 @@ from pathlib import Path
 from queue import Queue
 
 from .addon import ProxymanAddon
+from .scope import Scope
 
 
 class ProxyServer:
@@ -22,9 +23,10 @@ class ProxyServer:
     run_coroutine_threadsafe(), so the loop is NEVER closed between sessions.
     """
 
-    def __init__(self, port: int = 9090) -> None:
+    def __init__(self, port: int = 9090, scope: Scope | None = None) -> None:
         self.port = port
         self.flow_queue: Queue = Queue()
+        self.scope = scope or Scope()
         self._master = None
         self._addon: ProxymanAddon | None = None
         self.running = False
@@ -67,6 +69,30 @@ class ProxyServer:
     def clear_capture(self) -> None:
         if self._addon is not None:
             self._addon.clear()
+
+    def set_scope(self, allow: list[str], block: list[str]) -> None:
+        """Update the live capture scope (takes effect immediately)."""
+        self.scope.update(allow=allow, block=block)
+        # Also push to mitmproxy so non-allowed HTTPS hosts skip MITM entirely
+        # (otherwise apps with SSL pinning, e.g. Lark, break on TLS handshake).
+        self._apply_scope_to_master()
+
+    def _apply_scope_to_master(self) -> None:
+        master = self._master
+        if master is None:
+            return
+        allow_re, block_re = self.scope.to_mitm_patterns()
+
+        async def _update() -> None:
+            try:
+                master.options.update(
+                    allow_hosts=allow_re,
+                    ignore_hosts=block_re,
+                )
+            except Exception as exc:
+                self.flow_queue.put(("error", f"Capture error: scope update failed: {exc}"))
+
+        asyncio.run_coroutine_threadsafe(_update(), self._loop)
 
     # ------------------------------------------------------------------ #
     # Certificate helpers
@@ -174,8 +200,17 @@ class ProxyServer:
                 listen_host="0.0.0.0",
                 listen_port=self.port,
             )
+            # Apply scope at startup — non-allowed HTTPS hosts will be passed
+            # through untouched, so SSL-pinned apps (Lark, banking, etc.) keep
+            # working when the user has set a whitelist.
+            allow_re, block_re = self.scope.to_mitm_patterns()
+            if allow_re:
+                opts.allow_hosts = allow_re
+            if block_re:
+                opts.ignore_hosts = block_re
+
             master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-            addon = ProxymanAddon(self.flow_queue)
+            addon = ProxymanAddon(self.flow_queue, scope=self.scope)
             self._addon = addon
             master.addons.add(addon)
             self._master = master
