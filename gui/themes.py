@@ -23,18 +23,152 @@ QMenuBar {
     background-color: #181825;
     color: #cdd6f4;
     border-bottom: 1px solid #313244;
-    padding: 2px 0;
+    padding: 2px 4px;
+    spacing: 2px;
 }
-QMenuBar::item:selected {
+QMenuBar::item {
+    padding: 4px 10px;
+    border-radius: 5px;
+    background: transparent;
+}
+QMenuBar::item:selected,
+QMenuBar::item:pressed {
     background-color: #313244;
-    border-radius: 4px;
+    color: #cdd6f4;
 }
+
+/* ── Pop-up menus (menu bar dropdowns AND right-click context menus) ── */
 QMenu {
     background-color: #1e1e2e;
-    border: 1px solid #313244;
+    border: 1px solid #45475a;
+    border-radius: 10px;
+    padding: 6px 4px;
+    color: #cdd6f4;
+    font-size: 13px;
+}
+QMenu::item {
+    background: transparent;
+    color: #cdd6f4;
+    padding: 6px 32px 6px 14px;
+    margin: 1px 4px;
+    border-radius: 6px;
+    min-width: 170px;
 }
 QMenu::item:selected {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+QMenu::item:disabled {
+    color: #6c7086;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #313244;
+    margin: 5px 10px;
+}
+QMenu::icon {
+    padding-left: 8px;
+}
+/* Hide the checkable-item indicator column so non-checkable items don't
+   get an awkward empty gutter on the left. */
+QMenu::indicator {
+    width: 0;
+    height: 0;
+    margin: 0;
+}
+QMenu::right-arrow {
+    /* Native macOS arrow is inconsistent — we draw our own via menu title tabs. */
+    width: 0;
+    height: 0;
+    margin: 0;
+    image: none;
+    border: none;
+}
+
+/* ── Find bar (response body search) ─────────────────────────────── */
+QWidget#find_bar {
+    background-color: #181825;
+    border-bottom: 1px solid #313244;
+}
+QWidget#find_field {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    border-radius: 8px;
+}
+QWidget#find_field[focused="true"] {
+    border-color: #89b4fa;
+}
+QLabel#find_icon {
+    background: transparent;
+    color: #6c7086;
+    padding-left: 10px;
+    padding-right: 2px;
+}
+QLineEdit#find_input {
+    background: transparent;
+    border: none;
+    padding: 6px 4px 6px 0;
+    color: #cdd6f4;
+    font-size: 12px;
+    selection-background-color: #45475a;
+}
+QLineEdit#find_input:focus {
+    border: none;
+}
+QLabel#find_status {
+    background: transparent;
+    color: #6c7086;
+    font-size: 11px;
+    padding: 0 4px;
+}
+QWidget#find_nav_group {
+    background-color: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 7px;
+}
+QPushButton#find_nav_btn {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    min-width: 26px;
+    max-width: 26px;
+    min-height: 26px;
+    max-height: 26px;
+    padding: 0;
+    margin: 0;
+}
+QPushButton#find_nav_btn:hover {
+    background-color: #313244;
+}
+QPushButton#find_nav_btn:pressed {
     background-color: #45475a;
+}
+QPushButton#find_nav_btn:first-child {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+    border-right: 1px solid #313244;
+}
+QPushButton#find_nav_btn:last-child {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+QPushButton#find_close_btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
+    padding: 0;
+    margin: 0;
+}
+QPushButton#find_close_btn:hover {
+    background-color: #452632;
+    border-color: #f38ba844;
+}
+QPushButton#find_close_btn:pressed {
+    background-color: #5c3040;
 }
 
 /* ── Toolbar ─────────────────────────────────────────────────────── */

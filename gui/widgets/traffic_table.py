@@ -24,9 +24,21 @@ from PyQt6.QtWidgets import (
 )
 
 from proxy.models import FlowModel
+from gui.i18n import i18n, tr
 from gui.themes import METHOD_COLORS, status_color
 
-COLUMNS = ["#", "Method", "Status", "Host", "Path", "Type", "Size", "Duration", "Time"]
+# Column ids — used both as canonical identifiers and i18n keys.
+COLUMN_KEYS = [
+    "col.seq",
+    "col.method",
+    "col.status",
+    "col.host",
+    "col.path",
+    "col.type",
+    "col.size",
+    "col.duration",
+    "col.time",
+]
 
 # Custom role used by the proxy model when sorting — lets us return typed
 # values (ints / floats / datetimes) instead of the displayed strings.
@@ -50,12 +62,19 @@ class TrafficModel(QAbstractTableModel):
         return len(self._flows)
 
     def columnCount(self, parent=QModelIndex()) -> int:
-        return len(COLUMNS)
+        return len(COLUMN_KEYS)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return COLUMNS[section]
+            return tr(COLUMN_KEYS[section])
         return None
+
+    def retranslate(self) -> None:
+        """Force header view to repaint translated column titles."""
+        if self.columnCount():
+            self.headerDataChanged.emit(
+                Qt.Orientation.Horizontal, 0, self.columnCount() - 1
+            )
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -96,7 +115,10 @@ class TrafficModel(QAbstractTableModel):
     def _display(self, f: FlowModel, row: int, col: int) -> str:
         if col == 0: return str(self._seqs[row])
         if col == 1: return f.method
-        if col == 2: return str(f.status_code) if f.status_code else ("-" if not f.error else "ERR")
+        if col == 2:
+            if f.status_code:
+                return str(f.status_code)
+            return "ERR" if f.error else "-"
         if col == 3: return f.host
         if col == 4: return f.path or "/"
         if col == 5: return f.display_type() or "-"
@@ -146,7 +168,7 @@ class TrafficModel(QAbstractTableModel):
             if f.id == flow.id:
                 self._flows[i] = flow
                 top_left = self.index(i, 0)
-                bottom_right = self.index(i, len(COLUMNS) - 1)
+                bottom_right = self.index(i, len(COLUMN_KEYS) - 1)
                 self.dataChanged.emit(top_left, bottom_right)
                 return
         self.append_flow(flow)
@@ -246,6 +268,15 @@ class TrafficTable(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
 
+        i18n.language_changed.connect(self._on_language_changed)
+
+    # ------------------------------------------------------------------ #
+    # i18n
+    # ------------------------------------------------------------------ #
+
+    def _on_language_changed(self, _lang: str) -> None:
+        self._model.retranslate()
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -310,49 +341,99 @@ class TrafficTable(QWidget):
             return
 
         menu = QMenu(self)
+        menu.setSeparatorsCollapsible(False)
 
-        act_copy_url = QAction("Copy URL", menu)
-        act_copy_url.triggered.connect(lambda: self._copy_to_clipboard(flow.url))
-        menu.addAction(act_copy_url)
-
-        act_copy_curl = QAction("Copy as cURL", menu)
-        act_copy_curl.triggered.connect(lambda: self._copy_to_clipboard(flow.to_curl()))
-        menu.addAction(act_copy_curl)
-
-        if flow.response_body:
-            act_copy_body = QAction("Copy Response Body", menu)
-            text, _ = flow.get_response_body_display()
-            act_copy_body.triggered.connect(lambda: self._copy_to_clipboard(text))
-            menu.addAction(act_copy_body)
-
+        # ── Header: shows what the menu is targeting (disabled, italic). ──
+        header_text = self._format_menu_header(flow)
+        header_act = QAction(header_text, menu)
+        header_act.setEnabled(False)
+        font = header_act.font()
+        font.setItalic(True)
+        font.setPointSize(max(font.pointSize() - 1, 10))
+        header_act.setFont(font)
+        menu.addAction(header_act)
         menu.addSeparator()
 
-        act_replay = QAction("Replay", menu)
-        act_replay.triggered.connect(lambda: self.replay_requested.emit(flow))
-        menu.addAction(act_replay)
-
-        menu.addSeparator()
-
+        # ── Copy group ──
+        self._add_menu_action(menu, "📋", tr("ctx.copy_url"),
+                              lambda: self._copy_to_clipboard(flow.url))
+        self._add_menu_action(menu, "🔧", tr("ctx.copy_curl"),
+                              lambda: self._copy_to_clipboard(flow.to_curl()))
         if flow.host:
-            act_filter_host = QAction(f"Filter by host: {flow.host}", menu)
-            act_filter_host.triggered.connect(
-                lambda: self.filter_host_requested.emit(flow.host)
-            )
-            menu.addAction(act_filter_host)
+            self._add_menu_action(menu, "🌐", tr("ctx.copy_host"),
+                                  lambda: self._copy_to_clipboard(flow.host))
+        if flow.path:
+            self._add_menu_action(menu, "🧭", tr("ctx.copy_path"),
+                                  lambda: self._copy_to_clipboard(flow.path))
+        if flow.response_body:
+            text, _ = flow.get_response_body_display()
+            self._add_menu_action(menu, "📥", tr("ctx.copy_body"),
+                                  lambda t=text: self._copy_to_clipboard(t))
 
-            allow_menu = menu.addMenu("Add to allowlist")
+        menu.addSeparator()
+
+        # ── Replay ──
+        self._add_menu_action(menu, "↩", tr("ctx.replay"),
+                              lambda: self.replay_requested.emit(flow))
+
+        # ── Scope / filter group ──
+        if flow.host:
+            menu.addSeparator()
+            self._add_menu_action(
+                menu, "🔎",
+                tr("ctx.filter_host", host=flow.host),
+                lambda: self.filter_host_requested.emit(flow.host),
+            )
+
+            allow_menu = menu.addMenu(self._submenu_title("✅", tr("ctx.add_allow")))
             self._populate_scope_menu(allow_menu, "allow", flow.host)
 
-            block_menu = menu.addMenu("Add to blocklist")
+            block_menu = menu.addMenu(self._submenu_title("🚫", tr("ctx.add_block")))
             self._populate_scope_menu(block_menu, "block", flow.host)
 
         menu.addSeparator()
 
-        act_delete = QAction("Delete", menu)
-        act_delete.triggered.connect(lambda: self.delete_requested.emit(flow))
-        menu.addAction(act_delete)
+        # ── Destructive — visually separated and colored red ──
+        delete_act = self._add_menu_action(
+            menu, "🗑", tr("ctx.delete"),
+            lambda: self.delete_requested.emit(flow),
+        )
+        delete_font = delete_act.font()
+        delete_font.setWeight(500)
+        delete_act.setFont(delete_font)
 
         menu.exec(self._view.viewport().mapToGlobal(pos))
+
+    # ------------------------------------------------------------------ #
+    # Context menu helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _icon_prefix(icon: str) -> str:
+        """Pad an emoji icon so it lines up with text-only menu rows."""
+        return f"{icon}   "
+
+    @staticmethod
+    def _submenu_title(icon: str, label: str) -> str:
+        """Menu title with left emoji and right-aligned chevron (replaces native arrow)."""
+        return f"{TrafficTable._icon_prefix(icon)}{label}\t▸"
+
+    def _add_menu_action(self, menu: QMenu, icon: str, label: str, callback) -> QAction:
+        action = QAction(self._icon_prefix(icon) + label, menu)
+        action.triggered.connect(callback)
+        menu.addAction(action)
+        return action
+
+    @staticmethod
+    def _format_menu_header(flow: FlowModel) -> str:
+        """Compact METHOD + host/path summary shown at the top of the menu."""
+        path = flow.path or "/"
+        if len(path) > 48:
+            path = path[:45] + "…"
+        host = flow.host or ""
+        if host and path.startswith("/"):
+            return f"{flow.method}  {host}{path}"
+        return f"{flow.method}  {path}"
 
     def _populate_scope_menu(self, menu: QMenu, action: str, host: str) -> None:
         """Fill the Allow/Block submenu with one or two suggested patterns."""

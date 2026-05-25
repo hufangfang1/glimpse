@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
@@ -17,16 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
-HINT = (
-    "每行一个 host 模式，支持通配符 *，大小写不敏感\n"
-    "示例：  api.example.com    *.example.com    *.googleapis.com\n"
-    "想同时匹配根域名和子域名，请加两行：example.com 和 *.example.com\n"
-    "\n"
-    "白名单非空时，其他 host 会绕过 mitmproxy 直接转发（不解 TLS），\n"
-    "这样飞书、微信、银行等做了证书绑定（SSL pinning）的 App 不会被打断。\n"
-    "黑名单优先于白名单。修改对已有长连接不生效，需让 App 重连。"
-)
+from gui.i18n import tr
 
 
 class _PatternEditor(QWidget):
@@ -69,25 +59,25 @@ class ScopeDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Capture Scope")
+        self.setWindowTitle(tr("scope.title"))
         self.setModal(True)
         self.resize(640, 460)
 
         self._allow_editor = _PatternEditor(
-            "Allow (whitelist)",
+            tr("scope.allow.title"),
             "#a6e3a1",
-            "留空 = 抓所有 host\n例如：\n  api.example.com\n  *.example.com",
+            tr("scope.allow.placeholder"),
         )
         self._block_editor = _PatternEditor(
-            "Block (blacklist)",
+            tr("scope.block.title"),
             "#f38ba8",
-            "留空 = 不屏蔽\n例如：\n  *.apple.com\n  *.icloud.com\n  *.gvt1.com",
+            tr("scope.block.placeholder"),
         )
 
         self._allow_editor.set_patterns(allow)
         self._block_editor.set_patterns(block)
 
-        hint = QLabel(HINT)
+        hint = QLabel(tr("scope.hint"))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #a6adc8; font-size: 11px; padding: 6px 0;")
 
@@ -102,9 +92,10 @@ class ScopeDialog(QDialog):
             | QDialogButtonBox.StandardButton.Apply
             | QDialogButtonBox.StandardButton.Ok
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Save")
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("Apply")
-        buttons.button(QDialogButtonBox.StandardButton.Reset).setText("Clear All")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("common.save"))
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(tr("common.apply"))
+        buttons.button(QDialogButtonBox.StandardButton.Reset).setText(tr("common.clear_all"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("common.cancel"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._on_apply)

@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QEvent
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -36,6 +36,8 @@ from PyQt6.QtWidgets import (
 )
 
 from proxy.models import FlowModel
+from gui.i18n import i18n, tr
+from gui.icons import chevron_down, chevron_up, close_x, search_lens
 from gui.themes import METHOD_COLORS, status_color
 
 
@@ -95,25 +97,32 @@ class JsonHighlighter(QSyntaxHighlighter):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class InfoRow(QWidget):
-    """Key–value label pair."""
+    """Key–value label pair driven by an i18n key id."""
 
-    def __init__(self, key: str, value: str = "", parent=None) -> None:
+    def __init__(self, key_id: str, value: str = "", parent=None) -> None:
         super().__init__(parent)
+        self._key_id = key_id
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(8)
 
-        key_label = QLabel(key + ":")
-        key_label.setFixedWidth(90)
-        key_label.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        key_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._key_label = QLabel()
+        self._key_label.setFixedWidth(90)
+        self._key_label.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        self._key_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self._val = QLabel(value)
         self._val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._val.setWordWrap(True)
 
-        layout.addWidget(key_label)
+        layout.addWidget(self._key_label)
         layout.addWidget(self._val, 1)
+
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        self._key_label.setText(tr(self._key_id) + ":")
 
     def set_value(self, v: str) -> None:
         self._val.setText(v)
@@ -131,15 +140,123 @@ class HeadersView(QTextEdit):
         self.setFont(QFont("Menlo, SF Mono, monospace", 11))
 
     def set_headers(self, headers: dict) -> None:
+        self._headers = dict(headers or {})
+        self._render()
+
+    def retranslate(self) -> None:
+        if hasattr(self, "_headers"):
+            self._render()
+
+    def _render(self) -> None:
+        headers = getattr(self, "_headers", {}) or {}
         lines = [
             f"<span style='color:#89b4fa'>{html.escape(k)}</span>: "
             f"<span style='color:#cdd6f4'>{html.escape(v)}</span>"
             for k, v in headers.items()
         ]
-        self.setHtml("<br>".join(lines) or "<i style='color:#6c7086'>— no headers —</i>")
+        if lines:
+            self.setHtml("<br>".join(lines))
+        else:
+            empty = html.escape(tr("headers.empty"))
+            self.setHtml(f"<i style='color:#6c7086'>{empty}</i>")
 
 
-class BodyView(QPlainTextEdit):
+class SearchablePlainTextEdit(QPlainTextEdit):
+    """QPlainTextEdit with visible find highlights via ExtraSelections."""
+
+    _MATCH_BG = QColor("#585b20")       # muted gold — all matches
+    _MATCH_FG = QColor("#f9e2af")
+    _CURRENT_BG = QColor("#f9e2af")     # bright yellow — active match
+    _CURRENT_FG = QColor("#11111b")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._find_query: str = ""
+        self._find_index: int = 0
+        self._find_spans: list[tuple[int, int]] = []
+
+    def apply_find(self, query: str, *, index: int = 0) -> int:
+        """Highlight all *query* matches; *index* selects the active one."""
+        self._find_query = query
+        self._find_spans = self._collect_spans(query) if query else []
+        if self._find_spans:
+            self._find_index = index % len(self._find_spans)
+        else:
+            self._find_index = 0
+        self._render_find_highlights()
+        return len(self._find_spans)
+
+    def advance_find(self, delta: int) -> None:
+        if not self._find_spans:
+            return
+        self._find_index = (self._find_index + delta) % len(self._find_spans)
+        self._render_find_highlights()
+
+    def clear_find(self) -> None:
+        self._find_query = ""
+        self._find_index = 0
+        self._find_spans = []
+        self.setExtraSelections([])
+
+    def find_match_count(self) -> int:
+        return len(self._find_spans)
+
+    def find_current_index(self) -> int:
+        return self._find_index
+
+    def _collect_spans(self, query: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        if not query:
+            return spans
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        while True:
+            cursor = doc.find(query, cursor)
+            if cursor.isNull():
+                break
+            spans.append((cursor.selectionStart(), cursor.selectionEnd()))
+        return spans
+
+    def _render_find_highlights(self) -> None:
+        if not self._find_spans:
+            self.setExtraSelections([])
+            return
+
+        doc = self.document()
+        extra: list[QTextEdit.ExtraSelection] = []
+        for i, (start, end) in enumerate(self._find_spans):
+            sel = QTextEdit.ExtraSelection()
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor = cursor
+            fmt = QTextCharFormat()
+            if i == self._find_index:
+                fmt.setBackground(self._CURRENT_BG)
+                fmt.setForeground(self._CURRENT_FG)
+                fmt.setFontWeight(QFont.Weight.Bold)
+            else:
+                fmt.setBackground(self._MATCH_BG)
+                fmt.setForeground(self._MATCH_FG)
+            sel.format = fmt
+            extra.append(sel)
+
+        self.setExtraSelections(extra)
+
+        # Scroll the active match into view without using the grey selection color.
+        cur_start, cur_end = self._find_spans[self._find_index]
+        nav = QTextCursor(doc)
+        nav.setPosition(cur_start)
+        nav.setPosition(cur_end, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(nav)
+        self.ensureCursorVisible()
+        nav.clearSelection()
+        nav.setPosition(cur_end)
+        self.setTextCursor(nav)
+
+
+class BodyView(SearchablePlainTextEdit):
     """Read-only monospace view for request/response body with optional JSON highlighting."""
 
     def __init__(self, parent=None) -> None:
@@ -147,9 +264,15 @@ class BodyView(QPlainTextEdit):
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._highlighter: Optional[JsonHighlighter] = None
+        # Remember the last body so we can re-render the empty placeholder on
+        # language switches without losing the actual content.
+        self._raw_text: str = ""
+        self._is_json: bool = False
 
     def set_body(self, text: str, is_json: bool = False) -> None:
-        self.setPlainText(text or "— empty body —")
+        self._raw_text = text or ""
+        self._is_json = is_json
+        self.setPlainText(self._raw_text or tr("body.empty"))
         if is_json:
             if not self._highlighter:
                 self._highlighter = JsonHighlighter(self.document())
@@ -158,6 +281,10 @@ class BodyView(QPlainTextEdit):
         elif self._highlighter:
             self._highlighter.setDocument(None)
             self._highlighter = None
+
+    def retranslate(self) -> None:
+        if not self._raw_text:
+            self.setPlainText(tr("body.empty"))
 
 
 @dataclass
@@ -228,7 +355,7 @@ class JsonFoldGutter(QWidget):
             bottom = top + int(self._editor.blockBoundingRect(block).height())
 
 
-class JsonFoldView(QPlainTextEdit):
+class JsonFoldView(SearchablePlainTextEdit):
     """JSON text view with gutter fold controls like common online formatters."""
 
     def __init__(self, parent=None) -> None:
@@ -462,63 +589,142 @@ class JsonFoldView(QPlainTextEdit):
 class BodyFindBar(QWidget):
     """Inline find bar for QPlainTextEdit (⌘F style)."""
 
+    _BTN = 26
+    _CLOSE = 28
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("find_bar")
         self._target: Optional[QPlainTextEdit] = None
 
+        # Search field — icon + input inside a rounded capsule.
+        self._field = QWidget()
+        self._field.setObjectName("find_field")
+        field_layout = QHBoxLayout(self._field)
+        field_layout.setContentsMargins(0, 0, 8, 0)
+        field_layout.setSpacing(0)
+
+        self._icon = QLabel()
+        self._icon.setObjectName("find_icon")
+        self._icon.setPixmap(search_lens().pixmap(QSize(16, 16)))
+
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Find in body…")
+        self._input.setObjectName("find_input")
         self._input.returnPressed.connect(self.find_next)
         self._input.textChanged.connect(self._on_text_changed)
+        self._input.installEventFilter(self)
+
+        field_layout.addWidget(self._icon)
+        field_layout.addWidget(self._input, 1)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #6c7086; font-size: 11px;")
-        self._status.setFixedWidth(80)
+        self._status.setObjectName("find_status")
+        self._status.setFixedWidth(96)
         self._status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        btn_prev = QPushButton("↑")
-        btn_prev.setFixedWidth(28)
-        btn_prev.setToolTip("Previous match  (⇧⏎)")
-        btn_prev.clicked.connect(self.find_prev)
+        # Prev / next as a compact segmented control.
+        self._nav_group = QWidget()
+        self._nav_group.setObjectName("find_nav_group")
+        nav_layout = QHBoxLayout(self._nav_group)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
 
-        btn_next = QPushButton("↓")
-        btn_next.setFixedWidth(28)
-        btn_next.setToolTip("Next match  (⏎)")
-        btn_next.clicked.connect(self.find_next)
+        self._btn_prev = QPushButton()
+        self._btn_prev.setObjectName("find_nav_btn")
+        self._btn_prev.setFixedSize(self._BTN, self._BTN)
+        self._btn_prev.setIcon(chevron_up())
+        self._btn_prev.setIconSize(QSize(12, 12))
+        self._btn_prev.clicked.connect(self.find_prev)
 
-        btn_close = QPushButton("✕")
-        btn_close.setFixedWidth(28)
-        btn_close.setToolTip("Close  (Esc)")
-        btn_close.clicked.connect(self.hide)
+        self._btn_next = QPushButton()
+        self._btn_next.setObjectName("find_nav_btn")
+        self._btn_next.setFixedSize(self._BTN, self._BTN)
+        self._btn_next.setIcon(chevron_down())
+        self._btn_next.setIconSize(QSize(12, 12))
+        self._btn_next.clicked.connect(self.find_next)
+
+        nav_layout.addWidget(self._btn_prev)
+        nav_layout.addWidget(self._btn_next)
+
+        self._btn_close = QPushButton()
+        self._btn_close.setObjectName("find_close_btn")
+        self._btn_close.setFixedSize(self._CLOSE, self._CLOSE)
+        self._btn_close.setIcon(close_x())
+        self._btn_close.setIconSize(QSize(12, 12))
+        self._btn_close.clicked.connect(self.hide)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(6)
-        layout.addWidget(self._input, 1)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+        layout.addWidget(self._field, 1)
         layout.addWidget(self._status)
-        layout.addWidget(btn_prev)
-        layout.addWidget(btn_next)
-        layout.addWidget(btn_close)
+        layout.addWidget(self._nav_group)
+        layout.addWidget(self._btn_close)
 
-        self.setStyleSheet("background: #181825; border-bottom: 1px solid #313244;")
         self.hide()
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        self._input.setPlaceholderText(tr("find.placeholder"))
+        self._btn_prev.setToolTip(tr("find.prev.tooltip"))
+        self._btn_next.setToolTip(tr("find.next.tooltip"))
+        self._btn_close.setToolTip(tr("find.close.tooltip"))
+        self._update_status()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._input:
+            if event.type() == QEvent.Type.FocusIn:
+                self._field.setProperty("focused", True)
+            elif event.type() == QEvent.Type.FocusOut:
+                self._field.setProperty("focused", False)
+            if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+                self._field.style().unpolish(self._field)
+                self._field.style().polish(self._field)
+        return super().eventFilter(obj, event)
 
     def set_target(self, edit: Optional[QPlainTextEdit]) -> None:
+        if self._target is not None and hasattr(self._target, "clear_find"):
+            self._target.clear_find()
         self._target = edit
-        if self.isVisible():
-            self._update_status()
+        if self.isVisible() and self._input.text():
+            self._refresh_find(index=0)
+        self._update_status()
 
     def show_and_focus(self) -> None:
         self.show()
         self._input.setFocus()
         self._input.selectAll()
+        if self._input.text():
+            self._refresh_find(index=0)
         self._update_status()
 
+    def hide(self) -> None:
+        if self._target is not None and hasattr(self._target, "clear_find"):
+            self._target.clear_find()
+        super().hide()
+
     def find_next(self) -> None:
-        self._find(backward=False)
+        if self._target is not None and hasattr(self._target, "advance_find"):
+            self._target.advance_find(1)
+        else:
+            self._find(backward=False)
+        self._update_status()
 
     def find_prev(self) -> None:
-        self._find(backward=True)
+        if self._target is not None and hasattr(self._target, "advance_find"):
+            self._target.advance_find(-1)
+        else:
+            self._find(backward=True)
+        self._update_status()
+
+    def _refresh_find(self, *, index: int = 0) -> None:
+        text = self._input.text()
+        if not text or self._target is None:
+            if self._target is not None and hasattr(self._target, "clear_find"):
+                self._target.clear_find()
+            return
+        if hasattr(self._target, "apply_find"):
+            self._target.apply_find(text, index=index)
 
     def _find(self, *, backward: bool) -> None:
         text = self._input.text()
@@ -535,17 +741,14 @@ class BodyFindBar(QWidget):
             )
             self._target.setTextCursor(cursor)
             self._target.find(text, flags)
-        self._update_status()
 
     def _on_text_changed(self, text: str) -> None:
         if not text or self._target is None:
+            if self._target is not None and hasattr(self._target, "clear_find"):
+                self._target.clear_find()
             self._status.setText("")
             return
-        # Move cursor to start so the first find lands on the first match.
-        cursor = self._target.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-        self._target.setTextCursor(cursor)
-        self._target.find(text)
+        self._refresh_find(index=0)
         self._update_status()
 
     def _update_status(self) -> None:
@@ -553,10 +756,22 @@ class BodyFindBar(QWidget):
         if not text or self._target is None:
             self._status.setText("")
             return
+        if hasattr(self._target, "find_match_count"):
+            count = self._target.find_match_count()
+            if count == 0:
+                self._status.setText(tr("find.matches", n=0))
+            elif count == 1:
+                self._status.setText(tr("find.matches.one"))
+            else:
+                cur = self._target.find_current_index() + 1
+                self._status.setText(tr("find.matches.pos", cur=cur, total=count))
+            return
         haystack = self._target.toPlainText()
-        # Count is case-sensitive, matching QPlainTextEdit.find's default.
         count = haystack.count(text)
-        self._status.setText(f"{count} match{'es' if count != 1 else ''}")
+        if count == 1:
+            self._status.setText(tr("find.matches.one"))
+        else:
+            self._status.setText(tr("find.matches", n=count))
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -590,28 +805,27 @@ class BodyPanel(QWidget):
         toolbar.setContentsMargins(8, 4, 8, 4)
         toolbar.setSpacing(6)
 
-        self._btn_tree = QPushButton("Tree")
+        self._btn_tree = QPushButton()
         self._btn_tree.setCheckable(True)
         self._btn_tree.setChecked(True)
-        self._btn_tree.setFixedWidth(56)
+        self._btn_tree.setFixedWidth(64)
         self._btn_tree.clicked.connect(lambda: self._set_mode(tree=True))
 
-        self._btn_raw = QPushButton("Raw")
+        self._btn_raw = QPushButton()
         self._btn_raw.setCheckable(True)
-        self._btn_raw.setFixedWidth(56)
+        self._btn_raw.setFixedWidth(64)
         self._btn_raw.clicked.connect(lambda: self._set_mode(tree=False))
 
-        self._btn_expand = QPushButton("Expand All")
-        self._btn_expand.setFixedWidth(88)
+        self._btn_expand = QPushButton()
+        self._btn_expand.setFixedWidth(96)
         self._btn_expand.clicked.connect(self._fold.expand_all)
 
-        self._btn_collapse = QPushButton("Collapse All")
+        self._btn_collapse = QPushButton()
         self._btn_collapse.setFixedWidth(96)
         self._btn_collapse.clicked.connect(self._fold.collapse_all)
 
-        self._btn_find = QPushButton("🔍 Find")
-        self._btn_find.setFixedWidth(76)
-        self._btn_find.setToolTip("Find in body  (⌘F)")
+        self._btn_find = QPushButton()
+        self._btn_find.setFixedWidth(84)
         self._btn_find.clicked.connect(self._show_find)
 
         toolbar.addWidget(self._btn_tree)
@@ -640,6 +854,18 @@ class BodyPanel(QWidget):
         find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
         find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         find_shortcut.activated.connect(self._show_find)
+
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        self._btn_tree.setText(tr("body.tree"))
+        self._btn_raw.setText(tr("body.raw"))
+        self._btn_expand.setText(tr("body.expand_all"))
+        self._btn_collapse.setText(tr("body.collapse_all"))
+        self._btn_find.setText(tr("body.find"))
+        self._btn_find.setToolTip(tr("body.find.tooltip"))
+        self._text.retranslate()
+        self._find_bar.retranslate()
 
     def set_body(self, text: str, is_json: bool = False) -> None:
         self._is_json = is_json
@@ -694,17 +920,20 @@ class OverviewTab(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(4)
 
-        self._url = InfoRow("URL")
-        self._method = InfoRow("Method")
-        self._status = InfoRow("Status")
-        self._host = InfoRow("Host")
-        self._size = InfoRow("Size")
-        self._duration = InfoRow("Duration")
-        self._time = InfoRow("Timestamp")
-        self._type = InfoRow("Content-Type")
+        self._url = InfoRow("overview.url")
+        self._method = InfoRow("overview.method")
+        self._status = InfoRow("overview.status")
+        self._host = InfoRow("overview.host")
+        self._size = InfoRow("overview.size")
+        self._duration = InfoRow("overview.duration")
+        self._time = InfoRow("overview.timestamp")
+        self._type = InfoRow("overview.content_type")
 
-        for w in [self._url, self._method, self._status, self._host,
-                  self._size, self._duration, self._time, self._type]:
+        self._rows = [
+            self._url, self._method, self._status, self._host,
+            self._size, self._duration, self._time, self._type,
+        ]
+        for w in self._rows:
             layout.addWidget(w)
 
         sep = QFrame()
@@ -713,7 +942,7 @@ class OverviewTab(QWidget):
         layout.addWidget(sep)
 
         btn_row = QHBoxLayout()
-        self._btn_replay = QPushButton("↩ Replay")
+        self._btn_replay = QPushButton()
         self._btn_replay.setFixedWidth(100)
         self._btn_replay.clicked.connect(self._on_replay)
         btn_row.addWidget(self._btn_replay)
@@ -721,11 +950,17 @@ class OverviewTab(QWidget):
         layout.addLayout(btn_row)
         layout.addStretch()
 
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        for row in self._rows:
+            row.retranslate()
+        self._btn_replay.setText(tr("overview.replay"))
+
     def load(self, flow: Optional[FlowModel]) -> None:
         self._flow = flow
         if not flow:
-            for w in [self._url, self._method, self._status, self._host,
-                      self._size, self._duration, self._time, self._type]:
+            for w in self._rows:
                 w.set_value("")
             return
         self._url.set_value(flow.url)
@@ -748,6 +983,28 @@ class OverviewTab(QWidget):
             self.replay_requested.emit(self._flow)
 
 
+def _make_section(title_key: str, widget: QWidget) -> tuple[QWidget, QLabel]:
+    """Wrap *widget* with a colored section header label.
+
+    Returns the wrapper *and* the label so callers can refresh the label
+    text on language changes.
+    """
+    w = QWidget()
+    vl = QVBoxLayout(w)
+    vl.setContentsMargins(0, 0, 0, 0)
+    vl.setSpacing(0)
+    lbl = QLabel(tr(title_key))
+    lbl.setProperty("i18n_key", title_key)
+    lbl.setStyleSheet(
+        "background: #181825; color: #a6adc8; font-size: 11px; font-weight: 600;"
+        "text-transform: uppercase; letter-spacing: 1px; padding: 4px 12px;"
+        "border-bottom: 1px solid #313244;"
+    )
+    vl.addWidget(lbl)
+    vl.addWidget(widget)
+    return w, lbl
+
+
 class RequestTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -756,13 +1013,21 @@ class RequestTab(QWidget):
         self._headers = HeadersView()
         self._body = BodyPanel()
 
-        splitter.addWidget(self._make_section("Headers", self._headers))
-        splitter.addWidget(self._make_section("Body", self._body))
+        headers_section, self._headers_label = _make_section("section.headers", self._headers)
+        body_section, self._body_label = _make_section("section.body", self._body)
+        splitter.addWidget(headers_section)
+        splitter.addWidget(body_section)
         splitter.setSizes([200, 300])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
+
+    def retranslate(self) -> None:
+        self._headers_label.setText(tr("section.headers"))
+        self._body_label.setText(tr("section.body"))
+        self._headers.retranslate()
+        self._body.retranslate()
 
     def load(self, flow: Optional[FlowModel]) -> None:
         if not flow:
@@ -773,22 +1038,6 @@ class RequestTab(QWidget):
         text, is_json = flow.get_request_body_display()
         self._body.set_body(text, is_json=is_json)
 
-    @staticmethod
-    def _make_section(title: str, widget: QWidget) -> QWidget:
-        w = QWidget()
-        vl = QVBoxLayout(w)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(0)
-        lbl = QLabel(title)
-        lbl.setStyleSheet(
-            "background: #181825; color: #a6adc8; font-size: 11px; font-weight: 600;"
-            "text-transform: uppercase; letter-spacing: 1px; padding: 4px 12px;"
-            "border-bottom: 1px solid #313244;"
-        )
-        vl.addWidget(lbl)
-        vl.addWidget(widget)
-        return w
-
 
 class ResponseTab(QWidget):
     def __init__(self, parent=None) -> None:
@@ -797,29 +1046,45 @@ class ResponseTab(QWidget):
 
         self._headers = HeadersView()
         self._body = BodyPanel()
+        self._flow: Optional[FlowModel] = None
 
-        splitter.addWidget(RequestTab._make_section("Headers", self._headers))
-        splitter.addWidget(RequestTab._make_section("Body", self._body))
+        headers_section, self._headers_label = _make_section("section.headers", self._headers)
+        body_section, self._body_label = _make_section("section.body", self._body)
+        splitter.addWidget(headers_section)
+        splitter.addWidget(body_section)
         splitter.setSizes([200, 300])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
+    def retranslate(self) -> None:
+        self._headers_label.setText(tr("section.headers"))
+        self._body_label.setText(tr("section.body"))
+        self._headers.retranslate()
+        self._body.retranslate()
+        # Re-render binary-image placeholder in the new language.
+        if self._flow is not None and self._flow.is_image():
+            self._render_image_placeholder(self._flow)
+
     def load(self, flow: Optional[FlowModel]) -> None:
+        self._flow = flow
         if not flow:
             self._headers.set_headers({})
             self._body.set_body("")
             return
         self._headers.set_headers(flow.response_headers)
         if flow.is_image():
-            self._body.set_body(
-                f"[Binary image: {flow.content_type}, {flow.format_size()}]",
-                is_json=False,
-            )
+            self._render_image_placeholder(flow)
             return
         text, is_json = flow.get_response_body_display()
         self._body.set_body(text, is_json=is_json)
+
+    def _render_image_placeholder(self, flow: FlowModel) -> None:
+        self._body.set_body(
+            tr("body.binary_image", ctype=flow.content_type or "?", size=flow.format_size()),
+            is_json=False,
+        )
 
 
 class WebSocketTab(QWidget):
@@ -830,10 +1095,16 @@ class WebSocketTab(QWidget):
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         layout.addWidget(self._text)
+        self._flow: Optional[FlowModel] = None
+
+    def retranslate(self) -> None:
+        # Re-render so the empty placeholder picks up the new language.
+        self.load(self._flow)
 
     def load(self, flow: Optional[FlowModel]) -> None:
+        self._flow = flow
         if not flow or not flow.ws_messages:
-            self._text.setPlainText("— no WebSocket messages —")
+            self._text.setPlainText(tr("ws.empty"))
             return
         lines = []
         for msg in flow.ws_messages:
@@ -853,7 +1124,7 @@ class DetailPanel(QWidget):
         super().__init__(parent)
 
         # placeholder when nothing is selected
-        self._placeholder = QLabel("← Select a request to inspect")
+        self._placeholder = QLabel()
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setStyleSheet("color: #6c7086; font-size: 14px;")
 
@@ -863,10 +1134,10 @@ class DetailPanel(QWidget):
         self._response_tab = ResponseTab()
         self._ws_tab = WebSocketTab()
 
-        self._tabs.addTab(self._overview, "Overview")
-        self._tabs.addTab(self._request_tab, "Request")
-        self._tabs.addTab(self._response_tab, "Response")
-        self._tabs.addTab(self._ws_tab, "WebSocket")
+        self._tabs.addTab(self._overview, "")
+        self._tabs.addTab(self._request_tab, "")
+        self._tabs.addTab(self._response_tab, "")
+        self._tabs.addTab(self._ws_tab, "")
 
         self._overview.replay_requested.connect(self.replay_requested)
 
@@ -875,6 +1146,23 @@ class DetailPanel(QWidget):
         layout.addWidget(self._placeholder)
         layout.addWidget(self._tabs)
         self._tabs.hide()
+
+        self.retranslate()
+        i18n.language_changed.connect(self._on_language_changed)
+
+    def _on_language_changed(self, _lang: str) -> None:
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        self._placeholder.setText(tr("detail.placeholder"))
+        self._tabs.setTabText(self._tabs.indexOf(self._overview), tr("detail.tab.overview"))
+        self._tabs.setTabText(self._tabs.indexOf(self._request_tab), tr("detail.tab.request"))
+        self._tabs.setTabText(self._tabs.indexOf(self._response_tab), tr("detail.tab.response"))
+        self._tabs.setTabText(self._tabs.indexOf(self._ws_tab), tr("detail.tab.websocket"))
+        self._overview.retranslate()
+        self._request_tab.retranslate()
+        self._response_tab.retranslate()
+        self._ws_tab.retranslate()
 
     def load(self, flow: Optional[FlowModel]) -> None:
         if flow is None:
@@ -890,11 +1178,9 @@ class DetailPanel(QWidget):
         self._response_tab.load(flow)
 
         # Show/hide WebSocket tab
-        ws_idx = 3
+        ws_idx = self._tabs.indexOf(self._ws_tab)
         if flow.flow_type == "websocket":
             self._ws_tab.load(flow)
-            if self._tabs.indexOf(self._ws_tab) == -1:
-                self._tabs.addTab(self._ws_tab, "WebSocket")
             self._tabs.setTabVisible(ws_idx, True)
         else:
             self._tabs.setTabVisible(ws_idx, False)

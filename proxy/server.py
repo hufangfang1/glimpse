@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from queue import Queue
 
+from gui.i18n import tr
+
 from .addon import GlimpseAddon
 from .scope import Scope
 
@@ -121,7 +123,7 @@ class ProxyServer:
     def install_cert_macos(self) -> tuple[bool, str]:
         """Install CA cert via osascript (prompts for admin password)."""
         if not self.cert_path.exists():
-            return False, "证书文件尚未生成，请先启动代理后再试"
+            return False, tr("dialog.cert.cert_missing")
 
         cert = str(self.cert_path)
         script = (
@@ -136,18 +138,25 @@ class ProxyServer:
                 capture_output=True,
                 text=True,
             )
-            return True, "证书已成功安装到系统钥匙串，请重启浏览器后生效。"
+            return True, tr("dialog.cert.installed_ok")
         except subprocess.CalledProcessError as exc:
             err = (exc.stderr or exc.stdout or str(exc)).strip()
             if "User canceled" in err or "用户取消" in err:
-                return False, "已取消安装。"
-            return False, f"安装失败：{err}"
+                return False, tr("dialog.cert.cancelled")
+            return False, tr("dialog.cert.install_failed", err=err)
         except OSError as exc:
-            return False, f"无法调用 osascript：{exc}"
+            return False, tr("dialog.cert.osascript_failed", exc=str(exc))
 
     @staticmethod
     def local_ip() -> str:
-        """Best-effort LAN address for mobile device proxy setup."""
+        """Best-effort LAN address for mobile device proxy setup.
+
+        Never raises — falls back to 127.0.0.1 if every probe fails. We catch
+        ``subprocess.SubprocessError`` separately because ``TimeoutExpired``
+        is NOT an ``OSError`` and would otherwise crash the caller when
+        ``ipconfig`` hangs (which we've seen on machines with stale network
+        interfaces).
+        """
         import platform
         import subprocess
 
@@ -160,14 +169,15 @@ class ProxyServer:
                         text=True,
                         timeout=2,
                     )
-                    ip = result.stdout.strip()
-                    if result.returncode == 0 and ip:
-                        return ip
-                except OSError:
-                    pass
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                ip = result.stdout.strip()
+                if result.returncode == 0 and ip:
+                    return ip
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(1.0)
                 sock.connect(("8.8.8.8", 80))
                 ip = sock.getsockname()[0]
                 # 198.18.0.0/15 is often a VPN/tunnel interface, not reachable from phone.

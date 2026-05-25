@@ -10,9 +10,8 @@ from typing import Dict, Optional
 
 import httpx
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -22,13 +21,13 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QToolBar,
-    QVBoxLayout,
     QWidget,
 )
 
 from proxy.models import FlowModel
 from proxy.scope import Scope
 from proxy.server import ProxyServer
+from gui.i18n import LANGUAGES, i18n, tr
 from gui.themes import DARK
 from gui.widgets.traffic_table import TrafficTable
 from gui.widgets.detail_panel import DetailPanel
@@ -41,16 +40,20 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Glimpse — HTTP Debugger")
         self.resize(1280, 780)
 
         self._server = ProxyServer(port=9090, scope=Scope.load())
         self._flows: Dict[str, FlowModel] = {}
         self._selected_flow_id: Optional[str] = None
+        # Track current proxy state so retranslate can refresh the status label
+        # without flipping it back to "Stopped" mid-run.
+        self._proxy_state: str = "stopped"   # "stopped" | "running" | "stopping"
 
         self._build_ui()
         self._build_menu()
         self._apply_theme()
+        self.retranslate()
+        i18n.language_changed.connect(self.retranslate)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_queue)
@@ -61,73 +64,69 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _build_ui(self) -> None:
-        tb = QToolBar("Controls")
-        tb.setMovable(False)
-        tb.setFloatable(False)
-        self.addToolBar(tb)
+        self._toolbar = QToolBar("Controls")
+        self._toolbar.setMovable(False)
+        self._toolbar.setFloatable(False)
+        self.addToolBar(self._toolbar)
 
-        self._btn_start = QPushButton("▶  Start")
+        self._btn_start = QPushButton()
         self._btn_start.setObjectName("btn_start")
         self._btn_start.setFixedWidth(90)
         self._btn_start.clicked.connect(self._start_proxy)
 
-        self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop = QPushButton()
         self._btn_stop.setObjectName("btn_stop")
         self._btn_stop.setFixedWidth(90)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_proxy)
 
-        port_label = QLabel("Port:")
-        port_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
+        self._port_label = QLabel()
+        self._port_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1024, 65535)
         self._port_spin.setValue(9090)
         self._port_spin.setFixedWidth(70)
 
-        btn_clear = QPushButton("🗑  Clear")
-        btn_clear.setFixedWidth(80)
-        btn_clear.clicked.connect(self._clear_traffic)
+        self._btn_clear = QPushButton()
+        self._btn_clear.setFixedWidth(80)
+        self._btn_clear.clicked.connect(self._clear_traffic)
 
-        filter_label = QLabel("Filter:")
-        filter_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
+        self._filter_label = QLabel()
+        self._filter_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
         self._filter_input = QLineEdit()
-        self._filter_input.setPlaceholderText("host / path / method…")
         self._filter_input.setFixedWidth(220)
         self._filter_input.textChanged.connect(self._on_filter_changed)
 
-        self._btn_replay = QPushButton("↩  Replay")
+        self._btn_replay = QPushButton()
         self._btn_replay.setFixedWidth(96)
         self._btn_replay.setEnabled(False)
-        self._btn_replay.setToolTip("Replay the selected request  (⇧⌘R)")
         self._btn_replay.clicked.connect(self._replay_selected)
 
-        self._btn_scope = QPushButton("🎯 Scope")
-        self._btn_scope.setFixedWidth(90)
-        self._btn_scope.setToolTip("Edit allow / block host patterns  (⌘L)")
+        self._btn_scope = QPushButton()
+        self._btn_scope.setFixedWidth(110)
         self._btn_scope.clicked.connect(self._edit_scope)
 
-        btn_cert = QPushButton("🔐 Install Cert")
-        btn_cert.setFixedWidth(110)
-        btn_cert.setToolTip("Install mitmproxy CA certificate into macOS system keychain")
-        btn_cert.clicked.connect(self._install_cert)
+        self._btn_cert = QPushButton()
+        self._btn_cert.setFixedWidth(120)
+        self._btn_cert.clicked.connect(self._install_cert)
 
-        tb.addWidget(self._btn_start)
-        tb.addWidget(self._btn_stop)
-        tb.addSeparator()
-        tb.addWidget(port_label)
-        tb.addWidget(self._port_spin)
-        tb.addSeparator()
-        tb.addWidget(btn_clear)
-        tb.addWidget(self._btn_replay)
-        tb.addSeparator()
-        tb.addWidget(filter_label)
-        tb.addWidget(self._filter_input)
+        self._toolbar.addWidget(self._btn_start)
+        self._toolbar.addWidget(self._btn_stop)
+        self._toolbar.addSeparator()
+        self._toolbar.addWidget(self._port_label)
+        self._toolbar.addWidget(self._port_spin)
+        self._toolbar.addSeparator()
+        self._toolbar.addWidget(self._btn_clear)
+        self._toolbar.addWidget(self._btn_replay)
+        self._toolbar.addSeparator()
+        self._toolbar.addWidget(self._filter_label)
+        self._toolbar.addWidget(self._filter_input)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb.addWidget(spacer)
-        tb.addWidget(self._btn_scope)
-        tb.addWidget(btn_cert)
+        self._toolbar.addWidget(spacer)
+        self._toolbar.addWidget(self._btn_scope)
+        self._toolbar.addWidget(self._btn_cert)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -148,9 +147,9 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
 
-        self._sb_status = QLabel("● Stopped")
+        self._sb_status = QLabel()
         self._sb_status.setStyleSheet("color: #f38ba8;")
-        self._sb_count = QLabel("0 requests")
+        self._sb_count = QLabel()
         self._sb_scope = QLabel("")
         self._sb_scope.setStyleSheet("color: #f9e2af;")
         self._sb_addr = QLabel("")
@@ -168,57 +167,119 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         menu = self.menuBar()
 
-        file_menu = menu.addMenu("File")
-        act_start = QAction("Start Proxy", self)
-        act_start.setShortcut(QKeySequence("Meta+R"))
-        act_start.triggered.connect(self._start_proxy)
-        file_menu.addAction(act_start)
+        self._file_menu = menu.addMenu("")
+        self._act_start = QAction(self)
+        self._act_start.setShortcut(QKeySequence("Meta+R"))
+        self._act_start.triggered.connect(self._start_proxy)
+        self._file_menu.addAction(self._act_start)
 
-        act_stop = QAction("Stop Proxy", self)
-        act_stop.setShortcut(QKeySequence("Meta+."))
-        act_stop.triggered.connect(self._stop_proxy)
-        file_menu.addAction(act_stop)
+        self._act_stop = QAction(self)
+        self._act_stop.setShortcut(QKeySequence("Meta+."))
+        self._act_stop.triggered.connect(self._stop_proxy)
+        self._file_menu.addAction(self._act_stop)
 
-        file_menu.addSeparator()
-        act_quit = QAction("Quit", self)
-        act_quit.setShortcut(QKeySequence("Meta+Q"))
-        act_quit.triggered.connect(self.close)
-        file_menu.addAction(act_quit)
+        self._file_menu.addSeparator()
+        self._act_quit = QAction(self)
+        self._act_quit.setShortcut(QKeySequence("Meta+Q"))
+        self._act_quit.triggered.connect(self.close)
+        self._file_menu.addAction(self._act_quit)
 
-        edit_menu = menu.addMenu("Edit")
-        act_clear = QAction("Clear Traffic", self)
-        act_clear.setShortcut(QKeySequence("Meta+K"))
-        act_clear.triggered.connect(self._clear_traffic)
-        edit_menu.addAction(act_clear)
+        self._edit_menu = menu.addMenu("")
+        self._act_clear = QAction(self)
+        self._act_clear.setShortcut(QKeySequence("Meta+K"))
+        self._act_clear.triggered.connect(self._clear_traffic)
+        self._edit_menu.addAction(self._act_clear)
 
-        act_replay = QAction("Replay Selected", self)
-        act_replay.setShortcut(QKeySequence("Meta+Shift+R"))
-        act_replay.triggered.connect(self._replay_selected)
-        edit_menu.addAction(act_replay)
+        self._act_replay = QAction(self)
+        self._act_replay.setShortcut(QKeySequence("Meta+Shift+R"))
+        self._act_replay.triggered.connect(self._replay_selected)
+        self._edit_menu.addAction(self._act_replay)
 
-        act_copy_url = QAction("Copy URL", self)
-        act_copy_url.setShortcut(QKeySequence("Meta+Shift+C"))
-        act_copy_url.triggered.connect(self._copy_selected_url)
-        edit_menu.addAction(act_copy_url)
+        self._act_copy_url = QAction(self)
+        self._act_copy_url.setShortcut(QKeySequence("Meta+Shift+C"))
+        self._act_copy_url.triggered.connect(self._copy_selected_url)
+        self._edit_menu.addAction(self._act_copy_url)
 
-        act_copy_curl = QAction("Copy as cURL", self)
-        act_copy_curl.setShortcut(QKeySequence("Meta+Alt+C"))
-        act_copy_curl.triggered.connect(self._copy_selected_curl)
-        edit_menu.addAction(act_copy_curl)
+        self._act_copy_curl = QAction(self)
+        self._act_copy_curl.setShortcut(QKeySequence("Meta+Alt+C"))
+        self._act_copy_curl.triggered.connect(self._copy_selected_curl)
+        self._edit_menu.addAction(self._act_copy_curl)
 
-        edit_menu.addSeparator()
-        act_scope = QAction("Capture Scope…", self)
-        act_scope.setShortcut(QKeySequence("Meta+L"))
-        act_scope.triggered.connect(self._edit_scope)
-        edit_menu.addAction(act_scope)
+        self._edit_menu.addSeparator()
+        self._act_scope = QAction(self)
+        self._act_scope.setShortcut(QKeySequence("Meta+L"))
+        self._act_scope.triggered.connect(self._edit_scope)
+        self._edit_menu.addAction(self._act_scope)
 
-        help_menu = menu.addMenu("Help")
-        act_setup = QAction("Setup Instructions", self)
-        act_setup.triggered.connect(self._show_setup)
-        help_menu.addAction(act_setup)
+        # Language menu — checkable radio group.
+        self._language_menu = menu.addMenu("")
+        self._language_group = QActionGroup(self)
+        self._language_group.setExclusive(True)
+        self._language_actions: Dict[str, QAction] = {}
+        for code, label in LANGUAGES.items():
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(code == i18n.language)
+            act.triggered.connect(lambda _checked=False, c=code: i18n.set_language(c))
+            self._language_group.addAction(act)
+            self._language_menu.addAction(act)
+            self._language_actions[code] = act
+
+        self._help_menu = menu.addMenu("")
+        self._act_setup = QAction(self)
+        self._act_setup.triggered.connect(self._show_setup)
+        self._help_menu.addAction(self._act_setup)
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(DARK)
+
+    # ------------------------------------------------------------------ #
+    # i18n
+    # ------------------------------------------------------------------ #
+
+    def retranslate(self) -> None:
+        self.setWindowTitle(tr("app.title"))
+
+        # Toolbar
+        self._toolbar.setWindowTitle(tr("toolbar.controls"))
+        self._btn_start.setText(tr("toolbar.start"))
+        self._btn_stop.setText(tr("toolbar.stop"))
+        self._port_label.setText(tr("toolbar.port"))
+        self._btn_clear.setText(tr("toolbar.clear"))
+        self._filter_label.setText(tr("toolbar.filter"))
+        self._filter_input.setPlaceholderText(tr("toolbar.filter.placeholder"))
+        self._btn_replay.setText(tr("toolbar.replay"))
+        self._btn_replay.setToolTip(tr("toolbar.replay.tooltip"))
+        self._btn_scope.setText(tr("toolbar.scope"))
+        self._btn_scope.setToolTip(tr("toolbar.scope.tooltip"))
+        self._btn_cert.setText(tr("toolbar.cert"))
+        self._btn_cert.setToolTip(tr("toolbar.cert.tooltip"))
+
+        # Menus
+        self._file_menu.setTitle(tr("menu.file"))
+        self._act_start.setText(tr("menu.file.start"))
+        self._act_stop.setText(tr("menu.file.stop"))
+        self._act_quit.setText(tr("menu.file.quit"))
+
+        self._edit_menu.setTitle(tr("menu.edit"))
+        self._act_clear.setText(tr("menu.edit.clear"))
+        self._act_replay.setText(tr("menu.edit.replay"))
+        self._act_copy_url.setText(tr("menu.edit.copy_url"))
+        self._act_copy_curl.setText(tr("menu.edit.copy_curl"))
+        self._act_scope.setText(tr("menu.edit.scope"))
+
+        self._language_menu.setTitle(tr("menu.language"))
+        for code, action in self._language_actions.items():
+            action.setChecked(code == i18n.language)
+
+        self._help_menu.setTitle(tr("menu.help"))
+        self._act_setup.setText(tr("menu.help.setup"))
+
+        # Status — refresh the parts that depend on the current state.
+        self._refresh_status_label()
+        self._update_count()
+        self._update_scope_status()
+        self._refresh_address_label()
 
     # ------------------------------------------------------------------ #
     # Queue polling
@@ -260,7 +321,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(err_msg, 5000)
             else:
                 self._on_proxy_stopped(self._server._generation)
-                QMessageBox.critical(self, "代理启动失败", err_msg)
+                QMessageBox.critical(
+                    self,
+                    tr("dialog.start_failed.title"),
+                    tr("dialog.start_failed.text", exc=err_msg),
+                )
 
         elif kind == "stopped":
             gen = item[1]
@@ -296,26 +361,27 @@ class MainWindow(QMainWindow):
         try:
             self._server.start()
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Failed to start proxy: {exc}")
+            QMessageBox.critical(
+                self,
+                tr("common.error"),
+                tr("dialog.start_failed.text", exc=str(exc)),
+            )
             return
 
-        lan = self._server.local_ip()
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._port_spin.setEnabled(False)
-        self._sb_status.setText("● Running")
-        self._sb_status.setStyleSheet("color: #a6e3a1;")
-        self._sb_addr.setText(
-            f"127.0.0.1:{port}  ·  LAN {lan}:{port}  ·  请配置浏览器/系统 HTTP 代理"
-        )
+        self._proxy_state = "running"
+        self._refresh_status_label()
+        self._refresh_address_label()
 
     def _stop_proxy(self) -> None:
         self._server.stop()
         self._btn_stop.setEnabled(False)
         self._btn_start.setEnabled(False)
         self._port_spin.setEnabled(False)
-        self._sb_status.setText("● Stopping…")
-        self._sb_status.setStyleSheet("color: #fab387;")
+        self._proxy_state = "stopping"
+        self._refresh_status_label()
 
     def _on_proxy_stopped(self, gen: int) -> None:
         if gen != self._server._generation:
@@ -324,9 +390,34 @@ class MainWindow(QMainWindow):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._port_spin.setEnabled(True)
-        self._sb_status.setText("● Stopped")
-        self._sb_status.setStyleSheet("color: #f38ba8;")
+        self._proxy_state = "stopped"
+        self._refresh_status_label()
         self._sb_addr.setText("")
+
+    def _refresh_status_label(self) -> None:
+        if self._proxy_state == "running":
+            self._sb_status.setText(tr("status.running"))
+            self._sb_status.setStyleSheet("color: #a6e3a1;")
+        elif self._proxy_state == "stopping":
+            self._sb_status.setText(tr("status.stopping"))
+            self._sb_status.setStyleSheet("color: #fab387;")
+        else:
+            self._sb_status.setText(tr("status.stopped"))
+            self._sb_status.setStyleSheet("color: #f38ba8;")
+
+    def _refresh_address_label(self) -> None:
+        if self._proxy_state != "running":
+            self._sb_addr.setText("")
+            return
+        # Network probing must never break the start flow — fall back to
+        # 127.0.0.1 if anything in local_ip() misbehaves (e.g. ipconfig hangs).
+        try:
+            lan = self._server.local_ip()
+        except Exception:
+            lan = "127.0.0.1"
+        self._sb_addr.setText(
+            tr("status.address", port=self._server.port, lan=lan)
+        )
 
     # ------------------------------------------------------------------ #
     # Traffic controls
@@ -400,7 +491,9 @@ class MainWindow(QMainWindow):
         try:
             self._server.scope.save()
         except OSError as exc:
-            self.statusBar().showMessage(f"Scope 保存失败: {exc}", 5000)
+            self.statusBar().showMessage(
+                tr("status.scope_save_failed", exc=str(exc)), 5000
+            )
         self._update_scope_status()
 
     def _add_to_scope(self, action: str, pattern: str) -> None:
@@ -410,16 +503,16 @@ class MainWindow(QMainWindow):
             return
         allow, block = self._server.scope.snapshot()
         target = allow if action == "allow" else block
+        kind = tr("status.kind.allow") if action == "allow" else tr("status.kind.block")
         if pattern.lower() in (p.lower() for p in target):
             self.statusBar().showMessage(
-                f"'{pattern}' 已在{('白' if action == 'allow' else '黑')}名单中", 3000
+                tr("status.scope_exists", pattern=pattern, kind=kind), 3000
             )
             return
         target.append(pattern)
         self._apply_scope(allow, block)
-        kind = "白" if action == "allow" else "黑"
         self.statusBar().showMessage(
-            f"已加入{kind}名单：{pattern} · 长连接需让 App 重连后生效", 5000
+            tr("status.scope_added", kind=kind, pattern=pattern), 5000
         )
 
     def _update_scope_status(self) -> None:
@@ -442,7 +535,10 @@ class MainWindow(QMainWindow):
 
     def _update_count(self) -> None:
         n = self._traffic_table.count()
-        self._sb_count.setText(f"{n} request{'s' if n != 1 else ''}")
+        if n == 1:
+            self._sb_count.setText(tr("status.requests.one"))
+        else:
+            self._sb_count.setText(tr("status.requests", n=n))
 
     # ------------------------------------------------------------------ #
     # Request replay
@@ -501,19 +597,24 @@ class MainWindow(QMainWindow):
     def _install_cert(self) -> None:
         if not self._server.cert_path.exists():
             QMessageBox.information(
-                self, "安装证书",
-                "证书文件尚未生成。\n\n请先点击 ▶ Start 启动代理，\n"
-                "mitmproxy 会自动在 ~/.mitmproxy/ 生成 CA 证书。"
+                self,
+                tr("dialog.cert.title"),
+                tr("dialog.cert.not_generated"),
             )
             return
 
         if self._server.cert_installed():
-            QMessageBox.information(self, "安装证书", "mitmproxy CA 证书已在系统钥匙串中。")
+            QMessageBox.information(
+                self,
+                tr("dialog.cert.title"),
+                tr("dialog.cert.already_installed"),
+            )
             return
 
         reply = QMessageBox.question(
-            self, "安装 HTTPS 证书",
-            "将把 mitmproxy CA 证书安装到系统钥匙串（需要输入管理员密码）。\n\n是否继续？",
+            self,
+            tr("dialog.cert.confirm.title"),
+            tr("dialog.cert.confirm.text"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -521,9 +622,9 @@ class MainWindow(QMainWindow):
 
         ok, msg = self._server.install_cert_macos()
         if ok:
-            QMessageBox.information(self, "安装证书", msg)
+            QMessageBox.information(self, tr("dialog.cert.title"), msg)
         else:
-            QMessageBox.warning(self, "安装证书", msg)
+            QMessageBox.warning(self, tr("dialog.cert.title"), msg)
 
     # ------------------------------------------------------------------ #
     # Setup help
@@ -532,16 +633,9 @@ class MainWindow(QMainWindow):
     def _show_setup(self) -> None:
         lan = self._server.local_ip()
         QMessageBox.information(
-            self, "Setup Instructions",
-            "1. Click ▶ Start to launch the proxy (default port 9090)\n\n"
-            "2. Desktop browser — set HTTP proxy to:\n"
-            "   Host: 127.0.0.1   Port: 9090\n\n"
-            "3. Mobile device (same Wi-Fi) — set HTTP proxy to:\n"
-            f"   Host: {lan}   Port: 9090\n\n"
-            "4. For HTTPS decryption, click 🔐 Install Cert\n"
-            "   (macOS will prompt for administrator password)\n\n"
-            "5. On iOS/Android, also install the cert from http://mitm.it\n\n"
-            "6. Filter traffic using the search bar in the toolbar."
+            self,
+            tr("dialog.setup.title"),
+            tr("dialog.setup.text", lan=lan),
         )
 
     def closeEvent(self, event) -> None:
