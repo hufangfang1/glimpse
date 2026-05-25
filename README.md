@@ -4,6 +4,8 @@
 
 用 Python + PyQt6 实现的 macOS HTTP/HTTPS 抓包调试工具，灵感来自 Proxyman / Charles。
 
+![Glimpse 主界面](assets/screenshot.png)
+
 ---
 
 ## 功能
@@ -124,6 +126,7 @@ glimpse/
 ├── Glimpse.app                   # 运行 build_app.sh 后生成，双击启动
 ├── scripts/build_app.sh          # 打包 macOS 应用
 ├── assets/AppIcon.png            # 应用图标
+├── assets/screenshot.png         # README 截图
 ├── requirements.txt
 ├── proxy/
 │   ├── models.py                 # FlowModel 数据模型
