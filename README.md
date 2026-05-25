@@ -158,3 +158,11 @@ glimpse/
 - 流量列表最多保留 2000 条，超出后自动丢弃最旧记录
 - Scope 改动只对**新建连接**生效，飞书等长连接 App 修改后需要重连
 - 仅用于合法的调试和开发，请勿用于未授权的网络监控
+
+---
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 开源。
+
+GUI 依赖 [PyQt6](https://www.riverbankcomputing.com/software/pyqt/)（GPL v3 或商业授权）。若你**打包分发** macOS 应用，请自行确认是否符合 PyQt6 的许可要求。
