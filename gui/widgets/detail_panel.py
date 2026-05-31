@@ -40,6 +40,16 @@ from gui.i18n import i18n, tr
 from gui.icons import chevron_down, chevron_up, close_x, search_lens
 from gui.themes import METHOD_COLORS, status_color
 
+# CORS response headers — highlighted in the response headers view for easy diagnosis.
+_CORS_HEADERS: frozenset[str] = frozenset({
+    "access-control-allow-origin",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "access-control-allow-credentials",
+    "access-control-expose-headers",
+    "access-control-max-age",
+})
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Simple JSON syntax highlighter
@@ -138,6 +148,11 @@ class HeadersView(QTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(QFont("Menlo, SF Mono, monospace", 11))
+        self._cors_highlight: bool = False
+
+    def enable_cors_highlight(self) -> None:
+        """Enable orange highlight for CORS response headers."""
+        self._cors_highlight = True
 
     def set_headers(self, headers: dict) -> None:
         self._headers = dict(headers or {})
@@ -149,16 +164,25 @@ class HeadersView(QTextEdit):
 
     def _render(self) -> None:
         headers = getattr(self, "_headers", {}) or {}
-        lines = [
-            f"<span style='color:#89b4fa'>{html.escape(k)}</span>: "
-            f"<span style='color:#cdd6f4'>{html.escape(v)}</span>"
-            for k, v in headers.items()
-        ]
+        lines = []
+        for k, v in headers.items():
+            if self._cors_highlight and k.lower() in _CORS_HEADERS:
+                line = (
+                    f"<span style='color:#fab387;font-weight:600'>{html.escape(k)}</span>: "
+                    f"<span style='color:#f9e2af'>{html.escape(v)}</span>"
+                )
+            else:
+                line = (
+                    f"<span style='color:#89b4fa'>{html.escape(k)}</span>: "
+                    f"<span style='color:#cdd6f4'>{html.escape(v)}</span>"
+                )
+            lines.append(line)
         if lines:
             self.setHtml("<br>".join(lines))
         else:
             empty = html.escape(tr("headers.empty"))
             self.setHtml(f"<i style='color:#6c7086'>{empty}</i>")
+
 
 
 class SearchablePlainTextEdit(QPlainTextEdit):
@@ -1045,12 +1069,35 @@ class ResponseTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Vertical, self)
 
         self._headers = HeadersView()
+        self._headers.enable_cors_highlight()
         self._body = BodyPanel()
         self._flow: Optional[FlowModel] = None
 
-        headers_section, self._headers_label = _make_section("section.headers", self._headers)
+        # Build headers section manually so we can insert the CORS hint bar.
+        headers_wrapper = QWidget()
+        hw_layout = QVBoxLayout(headers_wrapper)
+        hw_layout.setContentsMargins(0, 0, 0, 0)
+        hw_layout.setSpacing(0)
+
+        _SECTION_STYLE = (
+            "background: #181825; color: #a6adc8; font-size: 11px; font-weight: 600;"
+            "text-transform: uppercase; letter-spacing: 1px; padding: 4px 12px;"
+            "border-bottom: 1px solid #313244;"
+        )
+        self._headers_label = QLabel(tr("section.headers"))
+        self._headers_label.setStyleSheet(_SECTION_STYLE)
+
+        self._cors_bar = QLabel()
+        self._cors_bar.setWordWrap(True)
+        self._cors_bar.setContentsMargins(0, 0, 0, 0)
+        self._cors_bar.hide()
+
+        hw_layout.addWidget(self._headers_label)
+        hw_layout.addWidget(self._cors_bar)
+        hw_layout.addWidget(self._headers)
+
         body_section, self._body_label = _make_section("section.body", self._body)
-        splitter.addWidget(headers_section)
+        splitter.addWidget(headers_wrapper)
         splitter.addWidget(body_section)
         splitter.setSizes([200, 300])
 
@@ -1058,11 +1105,97 @@ class ResponseTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
+    @staticmethod
+    def _is_cross_origin(origin_value: str, scheme: str, host: str, port: int) -> bool:
+        """Return True when the Origin header differs from the request target's origin.
+
+        Compares scheme + host + port as per the HTML spec definition of 'same origin'.
+        """
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(origin_value)
+            o_scheme = parsed.scheme.lower()
+            o_host = parsed.hostname or ""
+            o_port = parsed.port
+            # Fill in default ports when absent.
+            default_ports = {"http": 80, "https": 443}
+            if o_port is None:
+                o_port = default_ports.get(o_scheme, 0)
+            t_port = port if port else default_ports.get(scheme.lower(), 0)
+            return not (
+                o_scheme == scheme.lower()
+                and o_host.lower() == host.lower()
+                and o_port == t_port
+            )
+        except Exception:
+            return True   # Malformed origin — treat as cross-origin to be safe.
+
+    def _update_cors_bar(self, flow: "FlowModel") -> None:  # type: ignore[name-defined]
+        """Accurately reflect CORS state by comparing Origin with the request target.
+
+        States:
+          - No Origin header     → native app client, CORS not applicable (hidden).
+          - Origin == target     → same-origin request, CORS not applicable (hidden).
+          - Origin != target     → cross-origin browser/WebView request:
+              * Missing CORS headers → browser WILL block  (red)
+              * CORS headers present → browser will allow  (green)
+        """
+        req_headers = flow.request_headers
+        resp_headers = flow.response_headers
+
+        origin_value = ""
+        for k, v in req_headers.items():
+            if k.lower() == "origin":
+                origin_value = v.strip()
+                break
+
+        if not origin_value or origin_value == "null":
+            # No Origin → native app, CORS irrelevant.
+            self._cors_bar.hide()
+            return
+
+        # Determine port from Host header or URL.
+        host_hdr = ""
+        for k, v in req_headers.items():
+            if k.lower() == "host":
+                host_hdr = v
+                break
+        port = flow.port if hasattr(flow, "port") and flow.port else 0
+        if ":" in (host_hdr or ""):
+            try:
+                port = int(host_hdr.rsplit(":", 1)[1])
+            except ValueError:
+                pass
+
+        cross = self._is_cross_origin(origin_value, flow.scheme, flow.host, port)
+        if not cross:
+            # Same-origin — CORS doesn't apply.
+            self._cors_bar.hide()
+            return
+
+        has_cors = any(k.lower() in _CORS_HEADERS for k in resp_headers)
+        if has_cors:
+            self._cors_bar.setText(tr("cors.hint.allowed", origin=origin_value))
+            self._cors_bar.setStyleSheet(
+                "background: #1e2d1e; color: #a6e3a1; font-size: 11px;"
+                "padding: 5px 12px; border-bottom: 1px solid #2a4a2a;"
+            )
+        else:
+            self._cors_bar.setText(tr("cors.hint.blocked", origin=origin_value))
+            self._cors_bar.setStyleSheet(
+                "background: #2d1b1b; color: #f38ba8; font-size: 11px;"
+                "padding: 5px 12px; border-bottom: 1px solid #45293a;"
+            )
+        self._cors_bar.show()
+
     def retranslate(self) -> None:
         self._headers_label.setText(tr("section.headers"))
         self._body_label.setText(tr("section.body"))
         self._headers.retranslate()
         self._body.retranslate()
+        # Refresh CORS bar text in new language.
+        if self._cors_bar.isVisible() and self._flow is not None:
+            self._update_cors_bar(self._flow)
         # Re-render binary-image placeholder in the new language.
         if self._flow is not None and self._flow.is_image():
             self._render_image_placeholder(self._flow)
@@ -1071,9 +1204,11 @@ class ResponseTab(QWidget):
         self._flow = flow
         if not flow:
             self._headers.set_headers({})
+            self._cors_bar.hide()
             self._body.set_body("")
             return
         self._headers.set_headers(flow.response_headers)
+        self._update_cors_bar(flow)
         if flow.is_image():
             self._render_image_placeholder(flow)
             return

@@ -91,7 +91,7 @@ def close_x(color: str = "#a6adc8", size: int = 14) -> QIcon:
     def draw(p: QPainter, s: int) -> None:
         pen = QPen(c, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
-        pad = s * 0.28
+        pad = int(s * 0.28)
         p.drawLine(pad, pad, s - pad, s - pad)
         p.drawLine(s - pad, pad, pad, s - pad)
 

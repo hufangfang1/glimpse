@@ -66,6 +66,7 @@ _EN: Dict[str, str] = {
     "status.stopped": "● Stopped",
     "status.running": "● Running",
     "status.stopping": "● Stopping…",
+    "status.proxy_restarting": "● Proxy restarted (network change detected)",
     "status.requests": "{n} requests",
     "status.requests.one": "1 request",
     "status.address": "127.0.0.1:{port}  ·  LAN {lan}:{port}  ·  configure HTTP proxy in your browser/system",
@@ -187,6 +188,16 @@ _EN: Dict[str, str] = {
     "ctx.add_block": "Add to blocklist",
     "ctx.delete": "Delete",
 
+    # CORS diagnostics
+    "cors.hint.blocked": (
+        "⚠  Cross-origin request from {origin} — no CORS headers in response, "
+        "browser / WebView will block this."
+    ),
+    "cors.hint.allowed": (
+        "✓  Cross-origin request from {origin} — CORS headers present, "
+        "browser / WebView will allow this."
+    ),
+
     # Scope dialog
     "scope.title": "Capture Scope",
     "scope.allow.title": "Allow (whitelist)",
@@ -235,6 +246,7 @@ _ZH: Dict[str, str] = {
     "status.stopped": "● 已停止",
     "status.running": "● 运行中",
     "status.stopping": "● 正在停止…",
+    "status.proxy_restarting": "● 代理已自动重启（检测到网络变化）",
     "status.requests": "{n} 个请求",
     "status.requests.one": "1 个请求",
     "status.address": "127.0.0.1:{port}  ·  LAN {lan}:{port}  ·  请配置浏览器/系统 HTTP 代理",
@@ -269,10 +281,10 @@ _ZH: Dict[str, str] = {
     ),
     "dialog.cert.already_installed": "mitmproxy CA 证书已在系统钥匙串中。",
     "dialog.cert.confirm.title": "安装 HTTPS 证书",
-    "dialog.cert.confirm.text": "将把 mitmproxy CA 证书安装到系统钥匙串（需要输入管理员密码）。\n\n是否继续？",
+    "dialog.cert.confirm.text": "将把 mitmproxy CA 证书安装到登录鬥北串（login keychain）。\n\n是否继续？",
     "dialog.cert.install_failed": "安装失败：{err}",
     "dialog.cert.cert_missing": "证书文件尚未生成，请先启动代理后再试",
-    "dialog.cert.installed_ok": "证书已成功安装到系统钥匙串，请重启浏览器后生效。",
+    "dialog.cert.installed_ok": "证书已成功安装到登录鬥北串，请重启浏览器后生效。",
     "dialog.cert.cancelled": "已取消安装。",
     "dialog.cert.osascript_failed": "无法调用 osascript：{exc}",
     "dialog.setup.title": "使用说明",
@@ -351,6 +363,16 @@ _ZH: Dict[str, str] = {
     "ctx.add_allow": "加入白名单",
     "ctx.add_block": "加入黑名单",
     "ctx.delete": "删除",
+
+    # CORS diagnostics
+    "cors.hint.blocked": (
+        "⚠  跨域请求（来源：{origin}）— 响应中没有 CORS 头，"
+        "浏览器 / WebView 将拦截此请求。"
+    ),
+    "cors.hint.allowed": (
+        "✓  跨域请求（来源：{origin}）— 响应包含 CORS 头，"
+        "浏览器 / WebView 会放行。"
+    ),
 
     # Scope dialog
     "scope.title": "抓包范围",

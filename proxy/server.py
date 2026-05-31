@@ -104,6 +104,11 @@ class ProxyServer:
     def cert_path(self) -> Path:
         return Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
 
+    @property
+    def _login_keychain(self) -> str:
+        """Path to the current user's login keychain (works on all modern macOS)."""
+        return str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
+
     def cert_installed(self) -> bool:
         if not self.cert_path.exists():
             return False
@@ -112,7 +117,7 @@ class ProxyServer:
                 [
                     "security", "find-certificate",
                     "-c", "mitmproxy",
-                    "/Library/Keychains/System.keychain",
+                    self._login_keychain,
                 ],
                 capture_output=True,
             )
@@ -121,19 +126,25 @@ class ProxyServer:
             return False
 
     def install_cert_macos(self) -> tuple[bool, str]:
-        """Install CA cert via osascript (prompts for admin password)."""
+        """Install CA cert into the user login keychain (no admin password needed).
+
+        Installing into the login keychain avoids the macOS Ventura/Sonoma
+        restriction that blocks osascript from modifying the System keychain
+        ("no user interaction was possible"). Safari, Chrome, Firefox, and
+        URLSession all honour login-keychain trust, which is sufficient for
+        local HTTPS debugging.
+        """
         if not self.cert_path.exists():
             return False, tr("dialog.cert.cert_missing")
 
-        cert = str(self.cert_path)
-        script = (
-            f'do shell script "security add-trusted-cert -d -r trustRoot '
-            f'-k /Library/Keychains/System.keychain \'{cert}\'" '
-            f"with administrator privileges"
-        )
         try:
             subprocess.run(
-                ["osascript", "-e", script],
+                [
+                    "security", "add-trusted-cert",
+                    "-r", "trustRoot",
+                    "-k", self._login_keychain,
+                    str(self.cert_path),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -141,8 +152,6 @@ class ProxyServer:
             return True, tr("dialog.cert.installed_ok")
         except subprocess.CalledProcessError as exc:
             err = (exc.stderr or exc.stdout or str(exc)).strip()
-            if "User canceled" in err or "用户取消" in err:
-                return False, tr("dialog.cert.cancelled")
             return False, tr("dialog.cert.install_failed", err=err)
         except OSError as exc:
             return False, tr("dialog.cert.osascript_failed", exc=str(exc))
@@ -236,14 +245,20 @@ class ProxyServer:
                 master.shutdown()
 
         watcher = asyncio.ensure_future(_stop_watcher())
+        crashed = False
         try:
             await master.run()
+            # If master.run() returns while _stop_event is NOT set, mitmproxy
+            # exited on its own (network reset, sleep/wake, internal error).
+            crashed = not self._stop_event.is_set()
         except OSError as exc:
             self.flow_queue.put(("error", str(exc)))
+            crashed = not self._stop_event.is_set()
         except Exception as exc:
             msg = str(exc)
             if msg:
                 self.flow_queue.put(("error", msg))
+            crashed = not self._stop_event.is_set()
         finally:
             watcher.cancel()
             try:
@@ -254,4 +269,7 @@ class ProxyServer:
                 await self._shutdown_servers(master)
             self._master = None
             self._addon = None
-            self.flow_queue.put(("stopped", gen))
+            if crashed:
+                self.flow_queue.put(("crashed", gen))
+            else:
+                self.flow_queue.put(("stopped", gen))

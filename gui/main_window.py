@@ -290,7 +290,10 @@ class MainWindow(QMainWindow):
         try:
             while True:
                 item = q.get_nowait()
-                self._handle_queue_item(item)
+                try:
+                    self._handle_queue_item(item)
+                except Exception as exc:
+                    self.statusBar().showMessage(f"UI error: {exc}", 4000)
         except Empty:
             pass
 
@@ -330,6 +333,10 @@ class MainWindow(QMainWindow):
         elif kind == "stopped":
             gen = item[1]
             self._on_proxy_stopped(gen)
+
+        elif kind == "crashed":
+            gen = item[1]
+            self._on_proxy_crashed(gen)
 
     def _add_flow(self, flow: FlowModel) -> None:
         self._flows[flow.id] = flow
@@ -393,6 +400,34 @@ class MainWindow(QMainWindow):
         self._proxy_state = "stopped"
         self._refresh_status_label()
         self._sb_addr.setText("")
+
+    def _on_proxy_crashed(self, gen: int) -> None:
+        """mitmproxy exited unexpectedly (sleep/wake, network reset, etc.).
+
+        Auto-restart after a short delay so the user doesn't have to do it
+        manually. The status bar shows a brief notice.
+        """
+        if gen != self._server._generation:
+            return
+        self._server.running = False
+        self.statusBar().showMessage(tr("status.proxy_restarting"), 3000)
+        QTimer.singleShot(1000, self._auto_restart_proxy)
+
+    def _auto_restart_proxy(self) -> None:
+        """Restart the proxy silently after a crash, if still in running state."""
+        if self._proxy_state != "running":
+            return
+        try:
+            self._server.start()
+        except Exception as exc:
+            self._proxy_state = "stopped"
+            self._refresh_status_label()
+            self._sb_addr.setText("")
+            QMessageBox.critical(
+                self,
+                tr("common.error"),
+                tr("dialog.start_failed.text", exc=str(exc)),
+            )
 
     def _refresh_status_label(self) -> None:
         if self._proxy_state == "running":
