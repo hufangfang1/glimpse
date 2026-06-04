@@ -16,6 +16,16 @@
 - Body 内 ⌘F 全文搜索（支持上下导航 + 匹配计数）
 - 列表关键词过滤 + 列排序（按状态码/耗时/大小/时间）
 - 请求重放（⇧⌘R）、Copy as cURL（⌥⌘C）、Copy URL（⇧⌘C）
+- **请求编辑器 (Request Editor)**：类 Postman 的请求构造与发送
+  - 工具栏 **📝 请求集** 打开空白编辑器；流量列表右键 **✏️ 编辑** 从抓包记录载入
+  - 支持 Method / URL、Params / Headers / Cookies / Body 可编辑表格，一键发送并查看响应（JSON 高亮）
+  - 左侧 **Collections**：分组管理已保存请求（新建分组、重命名、删除；请求可保存 / 另存为）
+  - 数据持久化至 `~/.glimpse/collections.json`
+- **Cookie 同步**（编辑器 Cookies 页）：
+  - **从抓包流量提取**（推荐）：使用代理捕获时浏览器实际发出的 Cookie，与线上行为一致
+  - **从 Chrome 读取**：读取本机 Chrome / Edge Cookie 库（需钥匙串授权「Chrome Safe Storage」）
+  - **从 Safari 读取**：解析 `Cookies.binarycookies`
+  - Chrome 127+ 的会话 Cookie（如 `PHPSESSID`）采用应用绑定加密，离线读取常失败；鉴权接口建议走代理抓包后使用「从抓包流量提取」
 - **抓取作用域 (Capture Scope)**：白名单 / 黑名单 host 模式，支持 `*.example.com` 通配
   - 接入 mitmproxy 的 `allow_hosts` / `ignore_hosts`，白名单外的 HTTPS 直接透传，不解 TLS
   - 解决飞书、银行等做了 SSL Pinning 的 App "网络不可用"问题
@@ -111,6 +121,17 @@ python main.py
 
 配置存于 `~/.glimpse/scope.json`，重启自动加载。
 
+### 请求编辑器与 Cookie 同步
+
+1. 点击工具栏 **📝 请求集** 新建请求，或在流量列表中右键某条记录选择 **✏️ 编辑** 载入
+2. 填写 Method、URL；在 **Params / Headers / Cookies / Body** 中编辑（表格末行可继续追加键值）
+3. 点击 **发送** 查看下方响应区（状态行、Body、Headers）
+4. 需要登录态时，在 **Cookies** 页点击 **同步 Cookie**：
+   - **从抓包流量提取**：先 **▶ Start** 代理，浏览器走 `127.0.0.1:9090` 并访问目标站，再同步（最可靠）
+   - **从 Chrome 读取**：首次会弹出 macOS 钥匙串授权，请选择「允许」或「始终允许」；同一次运行内会缓存密钥
+   - 若在地址栏直接打开的 GET 接口，请保持 Method 为 **GET**（勿误用 POST）
+5. 点击 **保存** 更新当前请求，或 **另存为…** 存入左侧分组；配置写入 `~/.glimpse/collections.json`
+
 ---
 
 ## 项目结构
@@ -127,14 +148,20 @@ glimpse/
 │   ├── models.py                 # FlowModel 数据模型
 │   ├── addon.py                  # mitmproxy Addon（捕获流量）
 │   ├── scope.py                  # 白/黑名单 host 模式
+│   ├── collections.py            # 请求集持久化（分组 + 已保存请求）
+│   ├── cookies.py                # Cookie 来源：抓包 / Chrome / Safari
 │   └── server.py                 # 代理服务器管理
 └── gui/
     ├── themes.py                 # 暗色主题
+    ├── i18n.py                   # 中英文界面文案
+    ├── icons.py                  # 程序绘制的小图标
     ├── main_window.py            # 主窗口
     └── widgets/
         ├── traffic_table.py      # 流量列表
         ├── detail_panel.py       # 请求/响应详情面板
-        └── scope_dialog.py       # 抓取作用域对话框
+        ├── scope_dialog.py       # 抓取作用域对话框
+        ├── request_editor.py     # 请求编辑器（发送 / 保存 / Cookie 同步）
+        └── kv_table.py           # Params / Headers / Cookies 键值表
 ```
 
 ---
@@ -145,7 +172,8 @@ glimpse/
 |------|-----|
 | MITM 代理引擎 | [mitmproxy](https://mitmproxy.org/) |
 | GUI 框架 | [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) |
-| 请求重放 | [httpx](https://www.python-httpx.org/) |
+| 请求重放 / 编辑器发送 | [httpx](https://www.python-httpx.org/) |
+| Chrome Cookie 解密 | [pycryptodome](https://www.pycryptodome.org/) |
 
 ---
 
@@ -155,6 +183,9 @@ glimpse/
 - 安装证书会通过 `osascript` 申请管理员权限，不会储存密码
 - 流量列表最多保留 2000 条，超出后自动丢弃最旧记录
 - Scope 改动只对**新建连接**生效，飞书等长连接 App 修改后需要重连
+- 请求编辑器可**同时打开多个**非模态窗口；关闭后自动释放
+- Chrome Cookie 同步依赖本机 `security` 命令读取钥匙串；Chrome 127+ 部分 Cookie 无法离线解密，请优先使用「从抓包流量提取」
+- 用户配置与请求集：`~/.glimpse/scope.json`、`~/.glimpse/collections.json`
 - 仅用于合法的调试和开发，请勿用于未授权的网络监控
 
 ---
