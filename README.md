@@ -28,21 +28,22 @@
 
 ## 安装
 
-先进入项目根目录（包含 `main.py`、`requirements.txt` 的 `glimpse/` 文件夹）：
+> 环境要求：macOS 11+ 、Python 3.9+
 
 ```bash
-cd glimpse   # 若 clone 时用了其他目录名，请改成实际路径
-```
+# 1. 克隆项目
+git clone git@github.com:hufangfang1/glimpse.git
+cd glimpse
 
-然后执行：
-
-```bash
-# 建议使用虚拟环境
+# 2. 创建并激活虚拟环境（推荐）
 python3 -m venv .venv
 source .venv/bin/activate
 
+# 3. 安装依赖
 python -m pip install -r requirements.txt
 ```
+
+之后无论用应用还是命令行运行，都不必再重复以上步骤。
 
 ---
 
@@ -50,13 +51,9 @@ python -m pip install -r requirements.txt
 
 ### 方式一：macOS 应用（推荐）
 
-**首次**（安装依赖 + 生成 `.app`）——在项目根目录下执行：
+**首次**——完成上面的「安装」后，在项目根目录生成 `.app`：
 
 ```bash
-cd glimpse   # 若已在项目根目录可省略
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 bash scripts/build_app.sh
 ```
 
@@ -65,7 +62,6 @@ bash scripts/build_app.sh
 **固定到「应用程序」或启动台**（不要用 Finder 把 `.app` 拖进去复制）——在项目根目录下执行：
 
 ```bash
-cd glimpse   # 若已在项目根目录可省略
 bash scripts/install_app.sh
 ```
 
@@ -80,7 +76,6 @@ bash scripts/install_app.sh
 在项目根目录下执行：
 
 ```bash
-cd glimpse   # 若已在项目根目录可省略
 source .venv/bin/activate   # 若尚未激活虚拟环境
 python main.py
 ```
