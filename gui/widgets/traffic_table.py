@@ -216,6 +216,7 @@ class TrafficTable(QWidget):
 
     flow_selected = pyqtSignal(object)      # emits FlowModel | None
     replay_requested = pyqtSignal(object)   # emits FlowModel
+    edit_requested = pyqtSignal(object)     # emits FlowModel — open in editor
     delete_requested = pyqtSignal(object)   # emits FlowModel
     filter_host_requested = pyqtSignal(str) # emits host string
     scope_add_requested = pyqtSignal(str, str)  # (action, pattern) — action: "allow"|"block"
@@ -375,6 +376,8 @@ class TrafficTable(QWidget):
         # ── Replay ──
         self._add_menu_action(menu, "↩", tr("ctx.replay"),
                               lambda: self.replay_requested.emit(flow))
+        self._add_menu_action(menu, "✏️", tr("ctx.edit"),
+                              lambda: self.edit_requested.emit(flow))
 
         # ── Scope / filter group ──
         if flow.host:

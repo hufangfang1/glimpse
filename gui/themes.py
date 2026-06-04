@@ -226,6 +226,30 @@ QPushButton#btn_stop {
 QPushButton#btn_stop:hover {
     background-color: #f5a0b8;
 }
+QPushButton#kv_delete_btn {
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 0;
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
+}
+QPushButton#kv_delete_btn:hover {
+    background-color: #452632;
+}
+QPushButton#kv_delete_btn:pressed {
+    background-color: #5c3040;
+}
+/* Dropdown arrow for buttons that own a QMenu (e.g. Sync Cookies). */
+QPushButton::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 8px;
+    width: 10px;
+    height: 10px;
+}
 
 /* ── LineEdit / SpinBox ──────────────────────────────────────────── */
 QLineEdit, QSpinBox {
@@ -245,6 +269,56 @@ QSpinBox::up-button, QSpinBox::down-button {
     border: none;
 }
 
+/* ── ComboBox (method selector, Save-As group picker) ────────────── */
+QComboBox {
+    background-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 3px 8px;
+    color: #cdd6f4;
+    min-height: 22px;
+}
+QComboBox:hover {
+    border-color: #585b70;
+}
+QComboBox:focus, QComboBox:on {
+    border-color: #89b4fa;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 22px;
+    border: none;
+    background: transparent;
+}
+/* The down-arrow image is injected per-widget at runtime (a real PNG) because
+   QSS cannot synthesize a triangle from borders — that renders as a square. */
+QComboBox::down-arrow {
+    width: 12px;
+    height: 12px;
+}
+/* The popup list. QComboBox renders it via an item view, so style that too. */
+QComboBox QAbstractItemView {
+    background-color: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    padding: 4px;
+    color: #cdd6f4;
+    outline: none;
+    selection-background-color: #89b4fa;
+    selection-color: #11111b;
+}
+QComboBox QAbstractItemView::item {
+    padding: 5px 10px;
+    border-radius: 5px;
+    min-height: 20px;
+}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+
 /* ── Table ───────────────────────────────────────────────────────── */
 QTableView {
     background-color: #1e1e2e;
@@ -260,19 +334,90 @@ QTableView::item:selected {
     color: #cdd6f4;
 }
 
-/* ── Tree (JSON) ─────────────────────────────────────────────────── */
+/* ── Request editor sidebar ──────────────────────────────────────── */
+QWidget#editor_sidebar {
+    background-color: #181825;
+    border-right: 1px solid #313244;
+}
+QTreeWidget#editor_collections {
+    background-color: #181825;
+    border: none;
+    color: #cdd6f4;
+    outline: none;
+    padding: 4px 2px;
+    /* macOS draws a light native strip in the branch/indent column when this is on */
+    show-decoration-selected: 0;
+}
+QTreeWidget#editor_collections::branch {
+    background: #181825;
+    border: none;
+    border-image: none;
+    image: none;
+    width: 0px;
+}
+QTreeWidget#editor_collections QAbstractScrollArea::viewport {
+    background-color: #181825;
+}
+QTreeWidget#editor_collections QScrollBar:vertical {
+    background: #181825;
+    width: 8px;
+    margin: 0;
+}
+QTreeWidget#editor_collections QScrollBar::handle:vertical {
+    background: #45475a;
+    border-radius: 4px;
+    min-height: 24px;
+}
+QTreeWidget#editor_collections QScrollBar::add-line:vertical,
+QTreeWidget#editor_collections QScrollBar::sub-line:vertical,
+QTreeWidget#editor_collections QScrollBar::add-page:vertical,
+QTreeWidget#editor_collections QScrollBar::sub-page:vertical {
+    height: 0;
+    background: #181825;
+}
+QTreeWidget#editor_collections::item {
+    padding: 6px 8px;
+    margin: 1px 4px;
+    border-radius: 6px;
+    color: #cdd6f4;
+}
+QTreeWidget#editor_collections::item:hover {
+    background-color: #252539;
+}
+QTreeWidget#editor_collections::item:selected {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+QTreeWidget#editor_collections::item:selected:active {
+    background-color: #313244;
+}
+/* Legacy tree selector (non-editor trees, if any) */
 QTreeWidget {
     background-color: #181825;
     border: none;
     color: #cdd6f4;
     outline: none;
+    padding: 4px;
 }
 QTreeWidget::item {
-    padding: 2px 0;
+    padding: 5px 4px;
+    margin: 1px 4px;
+    border-radius: 6px;
+}
+QTreeWidget::item:hover {
+    background-color: #252539;
 }
 QTreeWidget::item:selected {
-    background-color: #313244;
+    background-color: #45475a;
     color: #cdd6f4;
+}
+/* Branch column: keep it clean. The disclosure arrows themselves are supplied
+   per-widget via real PNGs (see request_editor) because QSS cannot synthesize
+   triangles from borders the way web CSS can. */
+QTreeWidget::branch {
+    background: transparent;
+    border-image: none;
+    image: none;
 }
 QHeaderView::section {
     background-color: #181825;
@@ -288,6 +433,48 @@ QHeaderView::section {
 }
 QHeaderView::section:hover {
     background-color: #313244;
+}
+
+/* ── List (Save-As group picker) ─────────────────────────────────── */
+QListWidget {
+    background-color: #181825;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 4px;
+    color: #cdd6f4;
+    outline: none;
+}
+QListWidget::item {
+    padding: 6px 10px;
+    margin: 1px 2px;
+    border-radius: 6px;
+}
+QListWidget::item:hover {
+    background-color: #252539;
+}
+QListWidget::item:selected {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+QDialog#group_picker_dialog QLabel {
+    color: #a6adc8;
+    font-size: 12px;
+}
+QDialog#group_picker_dialog QListWidget#group_picker_list {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    min-height: 120px;
+}
+QDialog#text_prompt_dialog QLineEdit {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #cdd6f4;
+    min-height: 28px;
+}
+QDialog#text_prompt_dialog QLineEdit:focus {
+    border-color: #89b4fa;
 }
 
 /* ── Splitter ────────────────────────────────────────────────────── */

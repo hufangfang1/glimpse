@@ -119,6 +119,14 @@ class GlimpseAddon:
         resp = flow.response
         path, query = self._parse_url(req)
 
+        # Parse cookies before dict(req.headers) flattens duplicate cookie
+        # fields (HTTP/2 splits Cookie into one field per crumb). mitmproxy's
+        # req.cookies handles both HTTP/1.1 and HTTP/2 forms correctly.
+        try:
+            request_cookies = list(req.cookies.items(multi=True))
+        except Exception:
+            request_cookies = []
+
         resp_headers: dict = {}
         resp_body = b""
         status_code = None
@@ -142,6 +150,7 @@ class GlimpseAddon:
             status_message=status_msg,
             request_headers=dict(req.headers),
             request_body=req.content or b"",
+            request_cookies=request_cookies,
             response_headers=resp_headers,
             response_body=resp_body,
             duration=duration,

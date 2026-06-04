@@ -9,7 +9,7 @@ import shlex
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -48,6 +48,12 @@ class FlowModel:
     request_body: bytes = b""
     response_headers: Dict[str, str] = field(default_factory=dict)
     response_body: bytes = b""
+    # Cookies parsed at capture time, before lossy dict() flattening. On HTTP/2
+    # browsers split Cookie into one field per crumb; dict(headers) joins them
+    # with ", " which can't be re-split reliably (cookie values may contain
+    # commas). Keeping the parsed pairs here preserves every cookie for the
+    # editor. Empty for replayed/composed flows.
+    request_cookies: List[Tuple[str, str]] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
     duration: float = 0.0
     error: Optional[str] = None
@@ -228,6 +234,44 @@ class FlowModel:
         "transfer-encoding",
     }
 
+    def export_headers(self) -> List[tuple[str, str]]:
+        """Headers suitable for replay / curl export, as ordered (key, value) pairs.
+
+        Rebuilds the Cookie header from :attr:`request_cookies` (parsed at
+        capture time) instead of trusting ``request_headers["cookie"]`` — on
+        HTTP/2 the browser splits Cookie into multiple fields, which
+        ``dict(req.headers)`` flattens with ", " into a value the server can't
+        parse. Using the wrong Cookie on replay shows up as "not logged in".
+        """
+        out: List[tuple[str, str]] = []
+        for key, value in self.request_headers.items():
+            low = key.lower()
+            if low in self._SKIP_EXPORT_HEADERS:
+                continue
+            if low == "cookie":
+                continue   # re-emitted below from the structured cookies
+            out.append((key, value))
+
+        cookie = self.cookie_header()
+        if cookie:
+            out.append(("Cookie", cookie))
+        return out
+
+    def cookie_header(self) -> str:
+        """Return a valid ``name=value; ...`` Cookie string for this request.
+
+        Prefers cookies parsed at capture time; falls back to the raw header
+        only when the structured list is absent (e.g. replayed/composed flows),
+        re-splitting it on ", " to undo HTTP/2 field flattening as best we can.
+        """
+        if self.request_cookies:
+            return "; ".join(f"{n}={v}" for n, v in self.request_cookies)
+        raw = self._header_value(self.request_headers, "cookie")
+        if not raw:
+            return ""
+        # Best-effort un-flatten: split on ", " only between "crumb=" boundaries.
+        return raw.replace(", ", "; ")
+
     def to_curl(self, multiline: bool = True) -> str:
         """Render this flow's request as a runnable curl command."""
         parts: List[str] = ["curl"]
@@ -235,9 +279,7 @@ class FlowModel:
             parts.append(f"-X {self.method}")
         parts.append(shlex.quote(self.url))
 
-        for key, value in self.request_headers.items():
-            if key.lower() in self._SKIP_EXPORT_HEADERS:
-                continue
+        for key, value in self.export_headers():
             parts.append(f"-H {shlex.quote(f'{key}: {value}')}")
 
         if self.request_body:

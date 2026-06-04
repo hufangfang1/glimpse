@@ -27,11 +27,14 @@ from PyQt6.QtWidgets import (
 from proxy.models import FlowModel
 from proxy.scope import Scope
 from proxy.server import ProxyServer
+from proxy.collections import CollectionStore
+from proxy.cookies import CapturedCookieJar
 from gui.i18n import LANGUAGES, i18n, tr
 from gui.themes import DARK
 from gui.widgets.traffic_table import TrafficTable
 from gui.widgets.detail_panel import DetailPanel
 from gui.widgets.scope_dialog import ScopeDialog
+from gui.widgets.request_editor import RequestEditorDialog
 
 MAX_CAPTURED_FLOWS = 2000
 
@@ -45,6 +48,11 @@ class MainWindow(QMainWindow):
         self._server = ProxyServer(port=9090, scope=Scope.load())
         self._flows: Dict[str, FlowModel] = {}
         self._selected_flow_id: Optional[str] = None
+        # Saved-request collections + the live cookie jar fed from captured traffic.
+        self._collections = CollectionStore.load()
+        self._cookie_jar = CapturedCookieJar()
+        # Hold strong refs to open editors so they aren't garbage-collected.
+        self._editors: list[RequestEditorDialog] = []
         # Track current proxy state so retranslate can refresh the status label
         # without flipping it back to "Stopped" mid-run.
         self._proxy_state: str = "stopped"   # "stopped" | "running" | "stopping"
@@ -102,6 +110,10 @@ class MainWindow(QMainWindow):
         self._btn_replay.setEnabled(False)
         self._btn_replay.clicked.connect(self._replay_selected)
 
+        self._btn_collections = QPushButton()
+        self._btn_collections.setFixedWidth(120)
+        self._btn_collections.clicked.connect(self._open_editor_blank)
+
         self._btn_scope = QPushButton()
         self._btn_scope.setFixedWidth(110)
         self._btn_scope.clicked.connect(self._edit_scope)
@@ -118,6 +130,7 @@ class MainWindow(QMainWindow):
         self._toolbar.addSeparator()
         self._toolbar.addWidget(self._btn_clear)
         self._toolbar.addWidget(self._btn_replay)
+        self._toolbar.addWidget(self._btn_collections)
         self._toolbar.addSeparator()
         self._toolbar.addWidget(self._filter_label)
         self._toolbar.addWidget(self._filter_input)
@@ -133,6 +146,7 @@ class MainWindow(QMainWindow):
         self._traffic_table = TrafficTable()
         self._traffic_table.flow_selected.connect(self._on_flow_selected)
         self._traffic_table.replay_requested.connect(self._replay_flow)
+        self._traffic_table.edit_requested.connect(self._open_editor_for_flow)
         self._traffic_table.delete_requested.connect(self._delete_flow)
         self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
         self._traffic_table.scope_add_requested.connect(self._add_to_scope)
@@ -250,6 +264,8 @@ class MainWindow(QMainWindow):
         self._filter_input.setPlaceholderText(tr("toolbar.filter.placeholder"))
         self._btn_replay.setText(tr("toolbar.replay"))
         self._btn_replay.setToolTip(tr("toolbar.replay.tooltip"))
+        self._btn_collections.setText(tr("toolbar.collections"))
+        self._btn_collections.setToolTip(tr("toolbar.collections.tooltip"))
         self._btn_scope.setText(tr("toolbar.scope"))
         self._btn_scope.setToolTip(tr("toolbar.scope.tooltip"))
         self._btn_cert.setText(tr("toolbar.cert"))
@@ -340,6 +356,7 @@ class MainWindow(QMainWindow):
 
     def _add_flow(self, flow: FlowModel) -> None:
         self._flows[flow.id] = flow
+        self._cookie_jar.ingest_flow(flow)
         self._traffic_table.append_flow(flow)
         self._trim_old_flows()
         self._update_count()
@@ -587,8 +604,7 @@ class MainWindow(QMainWindow):
                     req = client.build_request(
                         method=flow.method,
                         url=flow.url,
-                        headers={k: v for k, v in flow.request_headers.items()
-                                 if k.lower() not in ("host", "content-length")},
+                        headers=flow.export_headers(),
                         content=flow.request_body or None,
                     )
                     resp = client.send(req)
@@ -605,6 +621,7 @@ class MainWindow(QMainWindow):
                     status_message=resp.reason_phrase,
                     request_headers=dict(resp.request.headers),
                     request_body=flow.request_body,
+                    request_cookies=list(flow.request_cookies),
                     response_headers=dict(resp.headers),
                     response_body=resp.content,
                     duration=resp.elapsed.total_seconds(),
@@ -624,6 +641,35 @@ class MainWindow(QMainWindow):
 
         t = threading.Thread(target=_do_replay, daemon=True)
         t.start()
+
+    # ------------------------------------------------------------------ #
+    # Request editor / collections
+    # ------------------------------------------------------------------ #
+
+    def _new_editor(self) -> RequestEditorDialog:
+        editor = RequestEditorDialog(
+            store=self._collections,
+            cookie_jar=self._cookie_jar,
+            parent=self,
+        )
+        self._editors.append(editor)
+        # Drop our reference once the window closes so editors are reclaimed.
+        editor.finished.connect(lambda _result, e=editor: self._editors.remove(e)
+                                if e in self._editors else None)
+        return editor
+
+    def _open_editor_blank(self) -> None:
+        editor = self._new_editor()
+        editor.show()
+        editor.raise_()
+        editor.activateWindow()
+
+    def _open_editor_for_flow(self, flow: FlowModel) -> None:
+        editor = self._new_editor()
+        editor.load_flow(flow)
+        editor.show()
+        editor.raise_()
+        editor.activateWindow()
 
     # ------------------------------------------------------------------ #
     # Certificate installation
