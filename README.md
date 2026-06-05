@@ -152,30 +152,39 @@ python main.py
 ```
 glimpse/
 ├── main.py                       # 入口
+├── auth.example.json             # 鉴权配置示例（复制到 ~/.glimpse/auth.json）
 ├── Glimpse.app                   # 运行 build_app.sh 后生成，双击启动
-├── scripts/build_app.sh          # 打包 macOS 应用
-├── assets/AppIcon.png            # 应用图标
-├── assets/screenshot.png         # README 截图
 ├── requirements.txt
+├── assets/
+│   ├── AppIcon.png               # 应用图标
+│   └── screenshot.png            # README 截图
+├── scripts/
+│   ├── build_app.sh              # 打包 macOS 应用
+│   └── install_app.sh            # 在「应用程序」创建快捷方式
 ├── proxy/
 │   ├── models.py                 # FlowModel 数据模型
 │   ├── addon.py                  # mitmproxy Addon（捕获流量）
+│   ├── server.py                 # 代理服务器管理
 │   ├── scope.py                  # 白/黑名单 host 模式
-│   ├── collections.py            # 请求集持久化（分组 + 已保存请求）
+│   ├── collections.py            # 请求集持久化（分组 + 已保存请求 + 最后响应）
 │   ├── cookies.py                # Cookie 来源：抓包 / Chrome / Safari
-│   ├── signing/                  # 可配置请求签名（auth.json 驱动）
-│   └── server.py                 # 代理服务器管理
+│   └── signing/                  # 可配置请求签名（auth.json 驱动）
+│       ├── store.py              # 读取 ~/.glimpse/auth.json 等配置
+│       ├── models.py             # SignerConfig / SignResult
+│       ├── registry.py           # 按 type 路由签名实现
+│       ├── chenla_uc.py          # UC RSA-SHA1（PHP buildSign 等价）
+│       └── apply.py              # 发送前注入 Header + Body
 └── gui/
-    ├── themes.py                 # 暗色主题
+    ├── themes.py                 # 暗色主题与控件尺寸常量
     ├── i18n.py                   # 中英文界面文案
     ├── icons.py                  # 程序绘制的小图标
-    ├── main_window.py            # 主窗口
+    ├── main_window.py            # 主窗口（左流量列表 + 右编辑器）
     └── widgets/
         ├── traffic_table.py      # 流量列表
-        ├── detail_panel.py       # Body/Headers/WS 展示组件（供编辑器复用）
-        ├── scope_dialog.py       # 抓取作用域对话框
-        ├── request_editor.py     # 内嵌请求编辑器（发送 / 保存 / Cookie 同步）
-        └── kv_table.py           # Params / Headers / Cookies 键值表
+        ├── request_editor.py     # 内嵌请求编辑器（发送 / 保存 / 请求集抽屉 / 鉴权）
+        ├── detail_panel.py       # Body / Headers / WebSocket 展示（编辑器响应区复用）
+        ├── kv_table.py           # Params / Headers / Cookies 键值表
+        └── scope_dialog.py       # 抓取作用域对话框
 ```
 
 ---
