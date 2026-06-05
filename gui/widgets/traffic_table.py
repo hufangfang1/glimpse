@@ -216,7 +216,6 @@ class TrafficTable(QWidget):
 
     flow_selected = pyqtSignal(object)      # emits FlowModel | None
     replay_requested = pyqtSignal(object)   # emits FlowModel
-    edit_requested = pyqtSignal(object)     # emits FlowModel — open in editor
     delete_requested = pyqtSignal(object)   # emits FlowModel
     filter_host_requested = pyqtSignal(str) # emits host string
     scope_add_requested = pyqtSignal(str, str)  # (action, pattern) — action: "allow"|"block"
@@ -264,6 +263,8 @@ class TrafficTable(QWidget):
             hh.resizeSection(col, width)
 
         self._view.selectionModel().selectionChanged.connect(self._on_selection)
+        # Re-emit when clicking the already-selected row (e.g. switch back from collections).
+        self._view.clicked.connect(self._on_row_clicked)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -327,6 +328,13 @@ class TrafficTable(QWidget):
         flow = self._flow_at_proxy_row(indexes[0].row())
         self.flow_selected.emit(flow)
 
+    def _on_row_clicked(self, index) -> None:
+        if not index.isValid():
+            return
+        flow = self._flow_at_proxy_row(index.row())
+        if flow is not None:
+            self.flow_selected.emit(flow)
+
     def _on_double_clicked(self, index) -> None:
         flow = self._flow_at_proxy_row(index.row())
         if flow:
@@ -376,8 +384,6 @@ class TrafficTable(QWidget):
         # ── Replay ──
         self._add_menu_action(menu, "↩", tr("ctx.replay"),
                               lambda: self.replay_requested.emit(flow))
-        self._add_menu_action(menu, "✏️", tr("ctx.edit"),
-                              lambda: self.edit_requested.emit(flow))
 
         # ── Scope / filter group ──
         if flow.host:

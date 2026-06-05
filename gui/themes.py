@@ -2,6 +2,9 @@
 Dark theme stylesheet — Glimpse.
 """
 
+# Toolbar / editor control row height (buttons, inputs, combos).
+CONTROL_HEIGHT = 24
+
 DARK = """
 /* ── Global ─────────────────────────────────────────────────────── */
 * {
@@ -175,7 +178,7 @@ QPushButton#find_close_btn:pressed {
 QToolBar {
     background-color: #181825;
     border-bottom: 1px solid #313244;
-    padding: 4px 8px;
+    padding: 3px 8px;
     spacing: 6px;
 }
 QToolButton {
@@ -198,9 +201,10 @@ QPushButton {
     background-color: #313244;
     border: 1px solid #45475a;
     border-radius: 6px;
-    padding: 4px 12px;
+    padding: 4px 10px;
     color: #cdd6f4;
-    min-height: 22px;
+    min-height: 24px;
+    max-height: 24px;
 }
 QPushButton:hover {
     background-color: #45475a;
@@ -256,17 +260,37 @@ QLineEdit, QSpinBox {
     background-color: #313244;
     border: 1px solid #45475a;
     border-radius: 6px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     color: #cdd6f4;
+    min-height: 24px;
+    max-height: 24px;
     selection-background-color: #89b4fa;
     selection-color: #1e1e2e;
 }
 QLineEdit:focus, QSpinBox:focus {
     border-color: #89b4fa;
 }
+QLineEdit#editor_url_input,
+QLineEdit#editor_name_input {
+    padding: 4px 10px;
+    min-height: 24px;
+    max-height: 24px;
+}
 QSpinBox::up-button, QSpinBox::down-button {
     width: 0;
     border: none;
+}
+
+/* ── Signer combo (runtime QSS also applied in request_editor) ───── */
+QComboBox#signer_combo {
+    background-color: #252536;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 2px 26px 2px 8px;
+    color: #6c7086;
+    font-size: 12px;
+    min-height: 24px;
+    max-height: 24px;
 }
 
 /* ── ComboBox (method selector, Save-As group picker) ────────────── */
@@ -363,10 +387,36 @@ QTableView::item:selected {
     color: #cdd6f4;
 }
 
-/* ── Request editor sidebar ──────────────────────────────────────── */
-QWidget#editor_sidebar {
+/* ── Request editor collections (right drawer + rail) ─────────────── */
+QWidget#editor_collections_drawer {
     background-color: #181825;
-    border-right: 1px solid #313244;
+    border-left: 1px solid #313244;
+}
+QLabel#editor_collections_title {
+    color: #a6adc8;
+    font-size: 12px;
+    font-weight: 600;
+}
+QWidget#editor_collections_rail {
+    background-color: #11111b;
+    border-left: 1px solid #313244;
+}
+QToolButton#editor_collections_toggle,
+QToolButton#editor_collections_add {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+}
+QToolButton#editor_collections_toggle:hover,
+QToolButton#editor_collections_add:hover {
+    background-color: #45475a;
+}
+QToolButton#editor_collections_toggle:pressed,
+QToolButton#editor_collections_add:pressed {
+    background-color: #585b70;
 }
 QTreeWidget#editor_collections {
     background-color: #181825;

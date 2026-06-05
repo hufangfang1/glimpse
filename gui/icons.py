@@ -85,6 +85,30 @@ def chevron_right(color: str = "#a6adc8", size: int = 12) -> QIcon:
     return _draw_icon(size, draw)
 
 
+def lock_icon(color: str = "#a6adc8", size: int = 16) -> QIcon:
+    """Small padlock for the request-signer selector."""
+    c = QColor(color)
+
+    def draw(p: QPainter, s: int) -> None:
+        from PyQt6.QtCore import QRectF
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        body_w, body_h = s * 0.56, s * 0.42
+        body_x = (s - body_w) / 2
+        body_y = s * 0.46
+        p.drawRoundedRect(QRectF(body_x, body_y, body_w, body_h), 2.0, 2.0)
+        pen = QPen(c, max(1.4, s * 0.11), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        sh_w, sh_h = s * 0.34, s * 0.28
+        sh_x = (s - sh_w) / 2
+        sh_y = s * 0.18
+        p.drawArc(int(sh_x), int(sh_y), int(sh_w), int(sh_h * 2), 0 * 16, 180 * 16)
+
+    return _draw_icon(size, draw)
+
+
 def _check_mark_pixmap(size: int = 16, bg: str = "#89b4fa", fg: str = "#1e1e2e") -> QPixmap:
     """Small rounded square with a check stroke — for KV table row toggles."""
     from PyQt6.QtCore import QRectF

@@ -30,11 +30,10 @@ from proxy.server import ProxyServer
 from proxy.collections import CollectionStore
 from proxy.cookies import CapturedCookieJar
 from gui.i18n import LANGUAGES, i18n, tr
-from gui.themes import DARK
+from gui.themes import CONTROL_HEIGHT, DARK
 from gui.widgets.traffic_table import TrafficTable
-from gui.widgets.detail_panel import DetailPanel
 from gui.widgets.scope_dialog import ScopeDialog
-from gui.widgets.request_editor import RequestEditorDialog
+from gui.widgets.request_editor import RequestEditorPanel
 
 MAX_CAPTURED_FLOWS = 2000
 
@@ -51,8 +50,6 @@ class MainWindow(QMainWindow):
         # Saved-request collections + the live cookie jar fed from captured traffic.
         self._collections = CollectionStore.load()
         self._cookie_jar = CapturedCookieJar()
-        # Hold strong refs to open editors so they aren't garbage-collected.
-        self._editors: list[RequestEditorDialog] = []
         # Track current proxy state so retranslate can refresh the status label
         # without flipping it back to "Stopped" mid-run.
         self._proxy_state: str = "stopped"   # "stopped" | "running" | "stopping"
@@ -112,7 +109,7 @@ class MainWindow(QMainWindow):
 
         self._btn_collections = QPushButton()
         self._btn_collections.setFixedWidth(120)
-        self._btn_collections.clicked.connect(self._open_editor_blank)
+        self._btn_collections.clicked.connect(self._new_editor_draft)
 
         self._btn_scope = QPushButton()
         self._btn_scope.setFixedWidth(110)
@@ -141,22 +138,37 @@ class MainWindow(QMainWindow):
         self._toolbar.addWidget(self._btn_scope)
         self._toolbar.addWidget(self._btn_cert)
 
+        for w in (
+            self._btn_start,
+            self._btn_stop,
+            self._port_spin,
+            self._btn_clear,
+            self._btn_replay,
+            self._btn_collections,
+            self._filter_input,
+            self._btn_scope,
+            self._btn_cert,
+        ):
+            w.setFixedHeight(CONTROL_HEIGHT)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._traffic_table = TrafficTable()
         self._traffic_table.flow_selected.connect(self._on_flow_selected)
         self._traffic_table.replay_requested.connect(self._replay_flow)
-        self._traffic_table.edit_requested.connect(self._open_editor_for_flow)
         self._traffic_table.delete_requested.connect(self._delete_flow)
         self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
         self._traffic_table.scope_add_requested.connect(self._add_to_scope)
 
-        self._detail_panel = DetailPanel()
-        self._detail_panel.replay_requested.connect(self._replay_flow)
+        self._editor_panel = RequestEditorPanel(
+            store=self._collections,
+            cookie_jar=self._cookie_jar,
+            parent=self,
+        )
 
         splitter.addWidget(self._traffic_table)
-        splitter.addWidget(self._detail_panel)
-        splitter.setSizes([700, 580])
+        splitter.addWidget(self._editor_panel)
+        splitter.setSizes([520, 760])
         splitter.setChildrenCollapsible(False)
 
         self.setCentralWidget(splitter)
@@ -325,14 +337,14 @@ class MainWindow(QMainWindow):
             if flow_id in self._flows:
                 self._flows[flow_id].ws_messages.append(msg)
                 self._traffic_table.update_flow(self._flows[flow_id])
-                self._refresh_detail_if_selected(flow_id)
+                self._refresh_editor_if_selected(flow_id)
 
         elif kind == "ws_end":
             flow_id, duration = item[1], item[2]
             if flow_id in self._flows:
                 self._flows[flow_id].duration = duration
                 self._traffic_table.update_flow(self._flows[flow_id])
-                self._refresh_detail_if_selected(flow_id)
+                self._refresh_editor_if_selected(flow_id)
 
         elif kind == "error":
             err_msg = item[1]
@@ -369,11 +381,11 @@ class MainWindow(QMainWindow):
             self._flows.pop(old.id, None)
             if self._selected_flow_id == old.id:
                 self._selected_flow_id = None
-                self._detail_panel.load(None)
+                self._editor_panel.clear()
 
-    def _refresh_detail_if_selected(self, flow_id: str) -> None:
+    def _refresh_editor_if_selected(self, flow_id: str) -> None:
         if self._selected_flow_id == flow_id and flow_id in self._flows:
-            self._detail_panel.load(self._flows[flow_id])
+            self._editor_panel.load_inspect_flow(self._flows[flow_id])
 
     # ------------------------------------------------------------------ #
     # Proxy control
@@ -480,7 +492,7 @@ class MainWindow(QMainWindow):
         self._selected_flow_id = None
         self._server.clear_capture()
         self._traffic_table.clear()
-        self._detail_panel.load(None)
+        self._editor_panel.clear()
         self._update_count()
 
     def _on_filter_changed(self, text: str) -> None:
@@ -488,7 +500,7 @@ class MainWindow(QMainWindow):
 
     def _on_flow_selected(self, flow: Optional[FlowModel]) -> None:
         self._selected_flow_id = flow.id if flow else None
-        self._detail_panel.load(flow)
+        self._editor_panel.load_inspect_flow(flow)
         self._btn_replay.setEnabled(flow is not None)
 
     def _apply_host_filter(self, host: str) -> None:
@@ -499,7 +511,7 @@ class MainWindow(QMainWindow):
         self._flows.pop(flow.id, None)
         if self._selected_flow_id == flow.id:
             self._selected_flow_id = None
-            self._detail_panel.load(None)
+            self._editor_panel.clear()
             self._btn_replay.setEnabled(False)
         self._update_count()
 
@@ -642,34 +654,9 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_do_replay, daemon=True)
         t.start()
 
-    # ------------------------------------------------------------------ #
-    # Request editor / collections
-    # ------------------------------------------------------------------ #
-
-    def _new_editor(self) -> RequestEditorDialog:
-        editor = RequestEditorDialog(
-            store=self._collections,
-            cookie_jar=self._cookie_jar,
-            parent=self,
-        )
-        self._editors.append(editor)
-        # Drop our reference once the window closes so editors are reclaimed.
-        editor.finished.connect(lambda _result, e=editor: self._editors.remove(e)
-                                if e in self._editors else None)
-        return editor
-
-    def _open_editor_blank(self) -> None:
-        editor = self._new_editor()
-        editor.show()
-        editor.raise_()
-        editor.activateWindow()
-
-    def _open_editor_for_flow(self, flow: FlowModel) -> None:
-        editor = self._new_editor()
-        editor.load_flow(flow)
-        editor.show()
-        editor.raise_()
-        editor.activateWindow()
+    def _new_editor_draft(self) -> None:
+        """Toolbar: start a blank request in the embedded editor."""
+        self._editor_panel.new_draft()
 
     # ------------------------------------------------------------------ #
     # Certificate installation

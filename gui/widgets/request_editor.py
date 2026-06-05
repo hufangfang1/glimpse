@@ -1,33 +1,33 @@
 """
-RequestEditorDialog — a Postman-style editor for composing & sending requests.
+RequestEditorPanel — Postman-style request composer embedded in the main window.
 
-Opened non-modally (so several can coexist) from the traffic table's right-click
-"Edit" action, or empty from the toolbar. Layout:
+Layout (right side of main window):
 
-    ┌───────────┬─────────────────────────────────────────────┐
-    │ Collections│  [METHOD ▾] [ URL .................. ] [Send]│
-    │  (groups   │  [Save] [Save As]                            │
-    │   tree)    │  ┌ Params │ Headers │ Cookies │ Body ┐       │
-    │            │  │            editable tabs            │     │
-    │            │  ├────────────────────────────────────┤     │
-    │            │  │  Response: status · headers · body  │     │
-    └───────────┴─────────────────────────────────────────────┘
+    ┌──────────────────────────────────────────────┬─┬──────────┐
+    │ [METHOD ▾] [ URL ................ ] [Send] │▸│ Saved    │
+    │ [Name] [Save] [Save As]                      │ │ requests │
+    │ ┌ Params │ Headers │ Cookies │ Body ┐       │ │ (drawer) │
+    │ ├────────────────────────────────────┤       │ │          │
+    │ │  Response: status · headers · body │       │ │          │
+    └──────────────────────────────────────────────┴─┴──────────┘
+    Collections drawer on the right edge; closed by default (icon rail only).
 
-Sending runs httpx on a worker thread; the result is marshalled back to the GUI
-thread via a Qt signal and rendered with the existing read-only viewers.
+Selecting a captured flow loads it for editing; saving only affects the collection
+store, not captured traffic. Sending runs httpx on a worker thread.
 """
 from __future__ import annotations
 
 import json
 import threading
 import uuid
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 import httpx
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPalette
+from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -41,18 +41,28 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
+    QScrollBar,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTabWidget,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from proxy.collections import CollectionStore, SavedRequest
+from proxy.collections import (
+    CollectionStore,
+    RequestGroup,
+    SavedRequest,
+    SavedResponseSnapshot,
+)
+from proxy.signing import AuthStore, apply_signer
 from proxy.cookies import (
     CapturedCookieJar,
     ChromeCookieRead,
@@ -64,11 +74,26 @@ from proxy.cookies import (
 from proxy.models import FlowModel
 from gui.i18n import i18n, tr
 from gui.icons import file_doc
-from gui.themes import DARK, METHOD_COLORS, status_color
-from gui.widgets.detail_panel import BodyPanel, HeadersView, JsonHighlighter
+from gui.themes import CONTROL_HEIGHT, METHOD_COLORS, status_color
+from gui.widgets.detail_panel import BodyPanel, HeadersView, JsonHighlighter, WebSocketTab
 from gui.widgets.kv_table import KeyValueTable
 
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+
+
+_EDITOR_CONTROL_HEIGHT = CONTROL_HEIGHT
+
+
+class _ComboPopupNoScrollFilter(QObject):
+    """Block wheel/trackpad scroll inside combo popups sized to fit all rows."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Wheel:
+            return True
+        return super().eventFilter(obj, event)
+
+_COLLECTIONS_DRAWER_WIDTH = 240
+_COLLECTIONS_RAIL_WIDTH = 32
 
 # Sent only when the user has not set them — mimics a normal browser navigation.
 _BROWSER_DEFAULT_HEADERS = {
@@ -183,13 +208,22 @@ class BodyEditor(QPlainTextEdit):
 
 
 class GroupPickerDialog(QDialog):
-    """Small dark-styled 'choose a group' dialog used by Save As.
+    """Small dark-styled 'choose a group' dialog used by Save / Save As.
 
     Replaces ``QInputDialog.getItem`` whose embedded combo popup ignores our
     stylesheet on macOS. A list is also clearer when there are many groups.
     """
 
-    def __init__(self, title: str, prompt: str, names: list[str], parent=None) -> None:
+    def __init__(
+        self,
+        title: str,
+        prompt: str,
+        names: list[str],
+        parent=None,
+        *,
+        new_group_label: str = "",
+        on_new_group: Optional[Callable[[], Optional[str]]] = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("group_picker_dialog")
         self.setWindowTitle(title)
@@ -206,7 +240,7 @@ class GroupPickerDialog(QDialog):
         if names:
             self._list.setCurrentRow(0)
         row_h = self._list.sizeHintForRow(0) if names else 28
-        self._list.setMinimumHeight(min(220, max(120, row_h * len(names) + 12)))
+        self._list.setMinimumHeight(min(220, max(120, row_h * max(len(names), 1) + 12)))
         self._list.itemDoubleClicked.connect(lambda _i: self.accept())
 
         buttons = QDialogButtonBox(
@@ -217,7 +251,27 @@ class GroupPickerDialog(QDialog):
 
         layout.addWidget(label)
         layout.addWidget(self._list, 1)
+
+        if on_new_group is not None:
+            new_row = QHBoxLayout()
+            btn_new = QPushButton(new_group_label)
+            btn_new.clicked.connect(lambda: self._add_new_group(on_new_group))
+            new_row.addWidget(btn_new)
+            new_row.addStretch()
+            layout.addLayout(new_row)
+
         layout.addWidget(buttons)
+
+    def _add_new_group(self, on_new_group: Callable[[], Optional[str]]) -> None:
+        name = on_new_group()
+        if not name:
+            return
+        for i in range(self._list.count()):
+            if self._list.item(i).text() == name:
+                self._list.setCurrentRow(i)
+                return
+        self._list.addItem(name)
+        self._list.setCurrentRow(self._list.count() - 1)
 
     def selected(self) -> Optional[str]:
         item = self._list.currentItem()
@@ -254,8 +308,77 @@ class TextPromptDialog(QDialog):
         return self._edit.text().strip()
 
 
-class RequestEditorDialog(QDialog):
-    """Non-modal Postman-style request composer with saved collections."""
+class _CollectionsTree(QTreeWidget):
+    """Collections tree — drag request rows onto a group to move them."""
+
+    request_dropped = pyqtSignal(str, str)  # request_id, target_group_id
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self._drag_request_id: Optional[str] = None
+
+    def startDrag(self, supportedActions) -> None:
+        items = self.selectedItems()
+        if len(items) != 1:
+            return
+        data = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] != "request":
+            return
+        self._drag_request_id = data[1]
+        super().startDrag(supportedActions)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is self and self._drag_request_id:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.source() is not self or not self._drag_request_id:
+            event.ignore()
+            return
+        if self._drop_group_id(self.itemAt(event.position().toPoint())):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        if event.source() is not self or not self._drag_request_id:
+            event.ignore()
+            return
+        target_gid = self._drop_group_id(self.itemAt(event.position().toPoint()))
+        if target_gid:
+            self.request_dropped.emit(self._drag_request_id, target_gid)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+        self._drag_request_id = None
+
+    @staticmethod
+    def _drop_group_id(item: Optional[QTreeWidgetItem]) -> Optional[str]:
+        if item is None:
+            return None
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return None
+        if data[0] == "group":
+            return data[1]
+        if data[0] == "request":
+            parent = item.parent()
+            if parent is not None:
+                pdata = parent.data(0, Qt.ItemDataRole.UserRole)
+                if pdata and pdata[0] == "group":
+                    return pdata[1]
+        return None
+
+
+class RequestEditorPanel(QWidget):
+    """Embedded Postman-style request composer with saved collections."""
 
     # Worker → GUI thread bridge. Carries (FlowModel|None, error_str|None).
     _response_ready = pyqtSignal(object, object)
@@ -265,18 +388,18 @@ class RequestEditorDialog(QDialog):
                  on_store_changed=None, parent=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._auth_store = AuthStore.load()
         self._cookie_jar = cookie_jar
         self._on_store_changed = on_store_changed
-        # The saved request currently bound to the editor (None = unsaved draft).
         self._current_request_id: Optional[str] = None
         self._current_group_id: Optional[str] = None
         self._last_save_group_id: Optional[str] = None
         self._suspend_sync = False
-
-        self.setWindowFlag(Qt.WindowType.Window, True)
-        self.resize(1040, 720)
-        # Top-level editor windows do not always inherit the main window QSS on macOS.
-        self.setStyleSheet(DARK)
+        self._send_disabled = False
+        self._saved_status_text = ""
+        self._collections_drawer_open = False
+        # Response currently shown in the pane (capture, send, or persisted reload).
+        self._last_response_flow: Optional[FlowModel] = None
 
         self._build_ui()
         self._response_ready.connect(self._on_response_ready)
@@ -284,7 +407,9 @@ class RequestEditorDialog(QDialog):
         self._chrome_sync_busy = False
         i18n.language_changed.connect(self.retranslate)
         self.retranslate()
+        self._reload_signer_combo()
         self._reload_tree()
+        self.clear()
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -294,61 +419,114 @@ class RequestEditorDialog(QDialog):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        # ── Left: collections tree ──
-        self._tree = QTreeWidget()
+        # ── Main: placeholder or editor + response ──
+        self._placeholder = QLabel()
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("color: #6c7086; font-size: 14px;")
+
+        self._work = QWidget()
+        work_layout = QVBoxLayout(self._work)
+        work_layout.setContentsMargins(8, 8, 8, 8)
+        work_layout.setSpacing(8)
+        work_layout.addLayout(self._build_url_bar())
+        work_layout.addLayout(self._build_save_bar())
+
+        editor_response = QSplitter(Qt.Orientation.Vertical)
+        editor_response.addWidget(self._build_request_tabs())
+        editor_response.addWidget(self._build_response_area())
+        editor_response.setSizes([360, 320])
+        work_layout.addWidget(editor_response, 1)
+
+        self._work_stack = QStackedWidget()
+        self._work_stack.addWidget(self._placeholder)
+        self._work_stack.addWidget(self._work)
+
+        # ── Right edge: collections drawer + icon rail ──
+        self._tree = _CollectionsTree()
         self._tree.setObjectName("editor_collections")
         self._tree.setHeaderHidden(True)
-        self._tree.setMinimumWidth(220)
-        # Indent child requests under groups; branch glyphs stay off (icons carry expand state).
+        self._tree.setMinimumWidth(180)
         self._tree.setIndentation(18)
         self._tree.setIconSize(QSize(22, 22))
         self._tree.setRootIsDecorated(False)
         self._tree.setAnimated(True)
+        self._tree.request_dropped.connect(self._on_request_dropped)
         self._tree.itemClicked.connect(self._on_tree_clicked)
         self._tree.itemExpanded.connect(self._on_group_expand_changed)
         self._tree.itemCollapsed.connect(self._on_group_expand_changed)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_menu)
 
-        left = QWidget()
-        left.setObjectName("editor_sidebar")
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(6)
-        self._btn_new_group = QPushButton()
+        self._collections_drawer = QWidget()
+        self._collections_drawer.setObjectName("editor_collections_drawer")
+        drawer_layout = QVBoxLayout(self._collections_drawer)
+        drawer_layout.setContentsMargins(8, 8, 4, 8)
+        drawer_layout.setSpacing(6)
+
+        drawer_header = QHBoxLayout()
+        drawer_header.setSpacing(6)
+        self._collections_title = QLabel()
+        self._collections_title.setObjectName("editor_collections_title")
+        self._btn_new_group = QToolButton()
+        self._btn_new_group.setObjectName("editor_collections_add")
+        self._btn_new_group.setFixedSize(28, 28)
         self._btn_new_group.clicked.connect(self._new_group)
-        left_layout.addWidget(self._btn_new_group)
-        left_layout.addWidget(self._tree, 1)
+        drawer_header.addWidget(self._collections_title, 1)
+        drawer_header.addWidget(self._btn_new_group)
+        drawer_layout.addLayout(drawer_header)
+        drawer_layout.addWidget(self._tree, 1)
 
-        # ── Right: editor + response ──
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.setSpacing(8)
-        right_layout.addLayout(self._build_url_bar())
-        right_layout.addLayout(self._build_save_bar())
+        self._collections_rail = QWidget()
+        self._collections_rail.setObjectName("editor_collections_rail")
+        self._collections_rail.setFixedWidth(_COLLECTIONS_RAIL_WIDTH)
+        rail_layout = QVBoxLayout(self._collections_rail)
+        rail_layout.setContentsMargins(4, 8, 4, 8)
+        rail_layout.setSpacing(8)
 
-        editor_response = QSplitter(Qt.Orientation.Vertical)
-        editor_response.addWidget(self._build_request_tabs())
-        editor_response.addWidget(self._build_response_area())
-        editor_response.setSizes([360, 320])
-        right_layout.addWidget(editor_response, 1)
+        self._btn_collections_toggle = QToolButton()
+        self._btn_collections_toggle.setObjectName("editor_collections_toggle")
+        self._btn_collections_toggle.setFixedSize(24, 24)
+        self._btn_collections_toggle.clicked.connect(self._toggle_collections_drawer)
 
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([240, 800])
-        splitter.setChildrenCollapsible(False)
-        outer.addWidget(splitter)
+        self._btn_rail_new_group = QToolButton()
+        self._btn_rail_new_group.setObjectName("editor_collections_add")
+        self._btn_rail_new_group.setFixedSize(24, 24)
+        self._btn_rail_new_group.clicked.connect(self._new_group)
+
+        rail_layout.addWidget(self._btn_collections_toggle)
+        rail_layout.addWidget(self._btn_rail_new_group)
+        rail_layout.addStretch()
+
+        self._collections_wrap = QWidget()
+        wrap_layout = QHBoxLayout(self._collections_wrap)
+        wrap_layout.setContentsMargins(0, 0, 0, 0)
+        wrap_layout.setSpacing(0)
+        self._collections_drawer.setFixedWidth(_COLLECTIONS_DRAWER_WIDTH)
+        wrap_layout.addWidget(self._collections_drawer)
+        wrap_layout.addWidget(self._collections_rail)
+
+        self._main_splitter.addWidget(self._work_stack)
+        self._main_splitter.addWidget(self._collections_wrap)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 0)
+        self._main_splitter.setChildrenCollapsible(False)
+
+        QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self._toggle_collections_drawer)
+
+        outer.addWidget(self._main_splitter)
+        self._set_collections_drawer_open(False)
 
     def _build_url_bar(self):
         bar = QHBoxLayout()
         bar.setSpacing(6)
+        bar.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self._method_combo = QComboBox()
         self._method_combo.setObjectName("method_combo")
         self._method_combo.addItems(_METHODS)
         self._method_combo.setFixedWidth(104)
+        self._method_combo.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         # QListView forces a Qt popup on macOS; native menus ignore our dark QSS.
         popup = QListView(self._method_combo)
         popup.setSpacing(2)
@@ -357,40 +535,80 @@ class RequestEditorDialog(QDialog):
         popup.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         popup.setFrameShape(QListView.Shape.NoFrame)
         self._method_combo.setView(popup)
-        self._method_combo.setMaxVisibleItems(max(len(_METHODS), 12))
+        self._method_combo.setMaxVisibleItems(len(_METHODS))
         self._method_combo.setItemDelegate(_MethodDelegate(self._method_combo))
         self._method_combo.currentIndexChanged.connect(
             lambda _i: self._apply_method_combo_style())
         self._apply_method_combo_style()
+        self._method_popup_filter = _ComboPopupNoScrollFilter(popup)
+        popup.installEventFilter(self._method_popup_filter)
         _orig_show_popup = self._method_combo.showPopup
 
         def _show_method_popup() -> None:
+            self._fit_combo_popup(self._method_combo, min_width=112)
             _orig_show_popup()
-            self._fit_method_popup()
+            QTimer.singleShot(0, lambda: self._fit_combo_popup(self._method_combo, min_width=112))
+            QTimer.singleShot(20, lambda: self._fit_combo_popup(self._method_combo, min_width=112))
 
         self._method_combo.showPopup = _show_method_popup  # type: ignore[method-assign]
         self._url_input = QLineEdit()
+        self._url_input.setObjectName("editor_url_input")
+        self._url_input.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._url_input.setPlaceholderText("https://api.example.com/path")
         self._url_input.editingFinished.connect(self._sync_params_from_url)
         self._url_input.returnPressed.connect(self._send)
+        self._signer_combo = QComboBox()
+        self._signer_combo.setObjectName("signer_combo")
+        self._signer_combo.setFixedWidth(108)
+        self._signer_combo.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
+        self._signer_combo.setIconSize(QSize(16, 16))
+        signer_popup = QListView(self._signer_combo)
+        signer_popup.setSpacing(2)
+        signer_popup.setUniformItemSizes(True)
+        signer_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        signer_popup.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        signer_popup.setFrameShape(QListView.Shape.NoFrame)
+        self._signer_combo.setView(signer_popup)
+        self._signer_combo.setMaxVisibleItems(64)
+        self._signer_combo.currentIndexChanged.connect(self._update_signer_combo_appearance)
+        self._configure_signer_popup_view()
+        self._update_signer_combo_appearance()
+        self._signer_popup_filter = _ComboPopupNoScrollFilter(signer_popup)
+        signer_popup.installEventFilter(self._signer_popup_filter)
+        _orig_signer_popup = self._signer_combo.showPopup
+
+        def _show_signer_popup() -> None:
+            self._fit_combo_popup(self._signer_combo, min_popup_width=248)
+            _orig_signer_popup()
+            QTimer.singleShot(0, lambda: self._fit_combo_popup(self._signer_combo, min_popup_width=248))
+            QTimer.singleShot(20, lambda: self._fit_combo_popup(self._signer_combo, min_popup_width=248))
+
+        self._signer_combo.showPopup = _show_signer_popup  # type: ignore[method-assign]
         self._btn_send = QPushButton()
         self._btn_send.setObjectName("btn_start")
         self._btn_send.setFixedWidth(90)
+        self._btn_send.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._btn_send.clicked.connect(self._send)
         bar.addWidget(self._method_combo)
         bar.addWidget(self._url_input, 1)
+        bar.addWidget(self._signer_combo)
         bar.addWidget(self._btn_send)
         return bar
 
     def _build_save_bar(self):
         bar = QHBoxLayout()
         bar.setSpacing(6)
+        bar.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self._name_label = QLabel()
         self._name_input = QLineEdit()
+        self._name_input.setObjectName("editor_name_input")
+        self._name_input.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._name_input.setMinimumWidth(160)
         self._btn_save = QPushButton()
+        self._btn_save.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._btn_save.clicked.connect(self._save)
         self._btn_save_as = QPushButton()
+        self._btn_save_as.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._btn_save_as.clicked.connect(self._save_as)
         bar.addWidget(self._name_label)
         bar.addWidget(self._name_input, 1)
@@ -465,21 +683,161 @@ class RequestEditorDialog(QDialog):
         self._resp_headers = HeadersView()
         self._resp_headers.enable_cors_highlight()
         self._resp_body = BodyPanel()
+        self._ws_tab = WebSocketTab()
         self._resp_tabs.addTab(self._resp_body, "")
         self._resp_tabs.addTab(self._resp_headers, "")
+        self._resp_tabs.addTab(self._ws_tab, "")
+        self._ws_tab_index = self._resp_tabs.indexOf(self._ws_tab)
+        self._resp_tabs.setTabVisible(self._ws_tab_index, False)
 
         layout.addWidget(self._resp_status)
         layout.addWidget(self._resp_tabs, 1)
         return wrap
 
     # ------------------------------------------------------------------ #
+    # Panel state (embedded in main window)
+    # ------------------------------------------------------------------ #
+
+    def clear(self) -> None:
+        """Show placeholder when no flow is selected."""
+        self._work_stack.setCurrentWidget(self._placeholder)
+
+    def _show_work_area(self) -> None:
+        self._work_stack.setCurrentWidget(self._work)
+
+    def new_draft(self) -> None:
+        """Blank editor (toolbar「请求集」) — does not affect captured traffic."""
+        self._current_request_id = None
+        self._current_group_id = None
+        self._set_signer_id("")
+        self._send_disabled = False
+        self._btn_send.setEnabled(True)
+        self._show_work_area()
+        self._method_combo.setCurrentText("GET")
+        self._apply_method_combo_style()
+        self._url_input.clear()
+        self._name_input.clear()
+        self._params_table.set_rows([])
+        self._headers_table.set_rows([])
+        self._cookies_table.set_rows([])
+        self._body_editor.clear()
+        self._reset_response_pane()
+        self._configure_response_tabs_for_flow(None)
+
+    def load_inspect_flow(self, flow: Optional[FlowModel]) -> None:
+        """Load a captured flow for editing; show its response (read-only inspect)."""
+        if flow is None:
+            self.clear()
+            return
+        self._send_disabled = flow.flow_type == "websocket"
+        self._btn_send.setEnabled(not self._send_disabled)
+        self._show_work_area()
+        self._tree.clearSelection()
+        self.load_flow(flow)
+        self._display_captured_response(flow)
+        self._configure_response_tabs_for_flow(flow)
+
+    @staticmethod
+    def _flow_has_storable_response(flow: Optional[FlowModel]) -> bool:
+        if flow is None or flow.flow_type == "websocket":
+            return False
+        return (
+            flow.status_code is not None
+            or bool(flow.response_body)
+            or bool(flow.response_headers)
+        )
+
+    def _reset_response_pane(self) -> None:
+        self._last_response_flow = None
+        self._resp_status.setText(tr("editor.no_response"))
+        self._resp_status.setStyleSheet(
+            "background:#181825; color:#a6adc8; font-size:12px; padding:6px 12px;"
+            "border-bottom:1px solid #313244;"
+        )
+        self._resp_headers.set_headers({})
+        self._resp_body.set_body("")
+
+    def _display_captured_response(self, flow: FlowModel) -> None:
+        """Fill the response pane from a captured flow (not from Send)."""
+        sc = flow.status_code or 0
+        self._resp_status.setText(
+            tr("editor.response_status",
+               code=sc, reason=flow.status_message or "",
+               size=flow.format_size(), dur=flow.format_duration())
+        )
+        self._resp_status.setStyleSheet(
+            f"background:#181825; color:{status_color(sc)}; font-size:12px; padding:6px 12px;"
+            "border-bottom:1px solid #313244;"
+        )
+        self._resp_headers.set_headers(flow.response_headers or {})
+        if flow.flow_type == "websocket":
+            self._ws_tab.load(flow)
+        elif flow.is_image():
+            self._resp_body.set_body(
+                tr("body.binary_image", ctype=flow.content_type or "?", size=flow.format_size()),
+                is_json=False,
+            )
+        else:
+            text, is_json = flow.get_response_body_display()
+            self._resp_body.set_body(text, is_json=is_json)
+        if self._flow_has_storable_response(flow):
+            self._last_response_flow = flow
+
+    def _configure_response_tabs_for_flow(self, flow: Optional[FlowModel]) -> None:
+        if flow is not None and flow.flow_type == "websocket":
+            self._resp_tabs.setTabVisible(self._ws_tab_index, True)
+            self._resp_tabs.setCurrentWidget(self._ws_tab)
+        else:
+            self._resp_tabs.setTabVisible(self._ws_tab_index, False)
+            if flow is not None and (flow.response_body or flow.status_code is not None):
+                self._resp_tabs.setCurrentWidget(self._resp_body)
+            else:
+                self._resp_tabs.setCurrentIndex(0)
+
+    # ------------------------------------------------------------------ #
+    # Collections drawer
+    # ------------------------------------------------------------------ #
+
+    def _toggle_collections_drawer(self) -> None:
+        self._set_collections_drawer_open(not self._collections_drawer_open)
+
+    def _set_collections_drawer_open(self, open: bool) -> None:
+        self._collections_drawer_open = open
+        self._collections_drawer.setVisible(open)
+        if open:
+            self._reload_signer_combo(self._selected_signer_id())
+        total = max(self._main_splitter.width(), 400)
+        rail = _COLLECTIONS_RAIL_WIDTH
+        if open:
+            drawer = _COLLECTIONS_DRAWER_WIDTH
+            self._main_splitter.setSizes([total - drawer - rail, drawer + rail])
+        else:
+            self._main_splitter.setSizes([total - rail, rail])
+        self._sync_collections_toggle_label()
+
+    def _sync_collections_toggle_label(self) -> None:
+        if self._collections_drawer_open:
+            self._btn_collections_toggle.setText("›")
+            self._btn_collections_toggle.setToolTip(tr("editor.collections.hide"))
+        else:
+            self._btn_collections_toggle.setText("‹")
+            self._btn_collections_toggle.setToolTip(tr("editor.collections.show"))
+
+    # ------------------------------------------------------------------ #
     # i18n
     # ------------------------------------------------------------------ #
 
     def retranslate(self, _lang: str = "") -> None:
-        self.setWindowTitle(tr("editor.title"))
-        self._btn_new_group.setText(tr("editor.new_group"))
+        self._collections_title.setText(tr("editor.collections.title"))
+        self._btn_new_group.setText("+")
+        self._btn_new_group.setToolTip(tr("editor.new_group"))
+        self._btn_rail_new_group.setText("+")
+        self._btn_rail_new_group.setToolTip(tr("editor.new_group"))
+        self._sync_collections_toggle_label()
         self._btn_send.setText(tr("editor.send"))
+        self._signer_combo.setToolTip(tr("editor.signer.tooltip"))
+        if hasattr(self, "_signer_combo"):
+            self._reload_signer_combo(self._selected_signer_id())
         self._name_label.setText(tr("editor.name.label"))
         self._name_input.setPlaceholderText(tr("editor.name.placeholder"))
         self._name_input.setToolTip(tr("editor.name.tooltip"))
@@ -496,8 +854,11 @@ class RequestEditorDialog(QDialog):
         self._tabs.setTabText(1, tr("editor.tab.headers"))
         self._tabs.setTabText(2, tr("editor.tab.cookies"))
         self._tabs.setTabText(3, tr("editor.tab.body"))
+        self._placeholder.setText(tr("detail.placeholder"))
         self._resp_tabs.setTabText(0, tr("section.body"))
         self._resp_tabs.setTabText(1, tr("section.headers"))
+        self._resp_tabs.setTabText(self._ws_tab_index, tr("detail.tab.websocket"))
+        self._ws_tab.retranslate()
         self._params_table.retranslate(tr("editor.kv.key"), tr("editor.kv.value"))
         self._headers_table.retranslate(tr("editor.kv.key"), tr("editor.kv.value"))
         self._cookies_table.retranslate(tr("editor.kv.key"), tr("editor.kv.value"))
@@ -509,6 +870,157 @@ class RequestEditorDialog(QDialog):
     # ------------------------------------------------------------------ #
     # Collections tree
     # ------------------------------------------------------------------ #
+
+    def _configure_signer_popup_view(self) -> None:
+        """One-time popup list styling (avoid re-applying on every open → flicker)."""
+        view = self._signer_combo.view()
+        if view is None:
+            return
+        view.setStyleSheet("""
+            QListView {
+                background-color: #1e1e2e;
+                border: none;
+                outline: none;
+            }
+            QListView::item {
+                padding: 8px 14px;
+                min-height: 28px;
+            }
+            QListView::item:selected,
+            QListView::item:hover {
+                background-color: #45475a;
+                color: #cdd6f4;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                width: 0px;
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
+        """)
+        frame = view.window()
+        frame.setStyleSheet("""
+            QFrame {
+                background-color: #1e1e2e;
+                border: 1px solid #45475a;
+                border-radius: 8px;
+            }
+        """)
+
+    def _update_signer_combo_appearance(self, _index: int = -1) -> None:
+        """Update closed combo colours only — do not restyle the popup on open."""
+        from gui.icons import ensure_tree_branch_icons
+
+        active = bool(self._selected_signer_id())
+        fg = "#f9e2af" if active else "#6c7086"
+        border = "#f9e2af" if active else "#45475a"
+        bg = "#2a2838" if active else "#252536"
+        hover_border = "#f9e2af" if active else "#585b70"
+        try:
+            combo_arrow = ensure_tree_branch_icons().get("combo", "")
+        except Exception:
+            combo_arrow = ""
+        arrow_rule = (
+            f'QComboBox#signer_combo::down-arrow {{ image: url("{combo_arrow}"); '
+            f"width: 12px; height: 12px; margin-right: 6px; }}"
+            if combo_arrow
+            else ""
+        )
+        self._signer_combo.setStyleSheet(f"""
+            QComboBox#signer_combo {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 2px 26px 2px 8px;
+                color: {fg};
+                font-size: 12px;
+                font-weight: 500;
+                min-height: {_EDITOR_CONTROL_HEIGHT}px;
+                max-height: {_EDITOR_CONTROL_HEIGHT}px;
+            }}
+            QComboBox#signer_combo:hover {{
+                border-color: {hover_border};
+            }}
+            QComboBox#signer_combo:focus,
+            QComboBox#signer_combo:on {{
+                border-color: #89b4fa;
+            }}
+            QComboBox#signer_combo::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 22px;
+                border: none;
+                background: transparent;
+            }}
+            {arrow_rule}
+        """)
+
+    def _fit_combo_popup(
+        self,
+        combo: QComboBox,
+        *,
+        min_width: int = 0,
+        min_popup_width: int = 0,
+    ) -> None:
+        """Expand combo popup to fit every row — no scrollbar, no wheel scroll."""
+        view = combo.view()
+        if view is None:
+            return
+
+        n = max(1, combo.count())
+        combo.setMaxVisibleItems(n)
+
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setAutoScroll(False)
+
+        view.doItemsLayout()
+        list_h = 0
+        for i in range(n):
+            list_h += max(view.sizeHintForRow(i), 1)
+        if n > 1:
+            list_h += view.spacing() * (n - 1)
+        margins = view.contentsMargins()
+        list_h += margins.top() + margins.bottom() + 12
+
+        w = max(min_width, combo.width())
+        if min_popup_width:
+            fm = view.fontMetrics()
+            text_w = max(fm.horizontalAdvance(combo.itemText(i)) for i in range(n))
+            w = max(w, combo.width() + 80, text_w + 52, min_popup_width)
+
+        view.setMinimumWidth(w)
+        view.setMaximumWidth(max(w, 640))
+        view.setMinimumHeight(list_h)
+        view.setMaximumHeight(list_h)
+
+        vbar = view.verticalScrollBar()
+        if vbar is not None:
+            vbar.setEnabled(False)
+            vbar.hide()
+        hbar = view.horizontalScrollBar()
+        if hbar is not None:
+            hbar.setEnabled(False)
+            hbar.hide()
+
+        popup = view.window()
+        if popup is None or not popup.isVisible():
+            return
+        filt = None
+        if combo is self._method_combo:
+            filt = self._method_popup_filter
+        elif combo is self._signer_combo:
+            filt = self._signer_popup_filter
+        if filt is not None:
+            popup.installEventFilter(filt)
+        frame = popup.frameWidth() * 2
+        popup.setFixedSize(w + frame, list_h + frame)
+        for bar in popup.findChildren(QScrollBar):
+            bar.setEnabled(False)
+            bar.hide()
+        for area in popup.findChildren(QScrollArea):
+            area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _apply_method_combo_style(self) -> None:
         """Full method-selector QSS: badge colour, PNG chevron, dark popup list."""
@@ -531,10 +1043,11 @@ class RequestEditorDialog(QDialog):
                 background-color: #313244;
                 border: 1px solid #45475a;
                 border-radius: 6px;
-                padding: 4px 28px 4px 10px;
+                padding: 2px 28px 2px 10px;
                 color: {fg};
                 font-weight: 600;
-                min-height: 24px;
+                min-height: {_EDITOR_CONTROL_HEIGHT}px;
+                max-height: {_EDITOR_CONTROL_HEIGHT}px;
             }}
             QComboBox#method_combo:hover {{
                 border-color: #585b70;
@@ -572,6 +1085,12 @@ class RequestEditorDialog(QDialog):
                 border: none;
                 outline: none;
             }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                width: 0px;
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
         """)
         frame = view.window()
         frame.setStyleSheet("""
@@ -581,32 +1100,6 @@ class RequestEditorDialog(QDialog):
                 border-radius: 8px;
             }
         """)
-
-    def _fit_method_popup(self) -> None:
-        """Size the method dropdown to exactly fit all items — no scrollbar."""
-        from PyQt6.QtWidgets import QScrollBar
-
-        combo = self._method_combo
-        view = combo.view()
-        if view is None:
-            return
-        n = max(1, combo.count())
-        row_h = view.sizeHintForRow(0)
-        if row_h <= 0:
-            row_h = 28
-        pad = 8
-        h = row_h * n + pad
-        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        view.setFixedHeight(h)
-        view.setMinimumHeight(h)
-        view.setMaximumHeight(h)
-        popup = view.window()
-        w = max(combo.width(), 108)
-        frame = popup.frameWidth() * 2
-        popup.setFixedSize(w, h + frame)
-        for bar in popup.findChildren(QScrollBar):
-            bar.setVisible(False)
 
     @staticmethod
     def _path_from_url(url: str) -> str:
@@ -624,14 +1117,14 @@ class RequestEditorDialog(QDialog):
         if name:
             return name
         if (req.url or "").strip():
-            return RequestEditorDialog._path_from_url(req.url)
-        return RequestEditorDialog._path_from_legacy_name(req.name)
+            return RequestEditorPanel._path_from_url(req.url)
+        return RequestEditorPanel._path_from_legacy_name(req.name)
 
     @staticmethod
     def _default_name_for_editor(url: str = "") -> str:
         """Initial value for the name field (path only, no host/method)."""
         if url.strip():
-            return RequestEditorDialog._path_from_url(url)
+            return RequestEditorPanel._path_from_url(url)
         return "/"
 
     @staticmethod
@@ -639,7 +1132,7 @@ class RequestEditorDialog(QDialog):
         """Best-effort path for older saves that stored method/host in ``name``."""
         text = (name or "").strip() or "/"
         if text.startswith(("http://", "https://")):
-            return RequestEditorDialog._path_from_url(text)
+            return RequestEditorPanel._path_from_url(text)
         upper = text.upper()
         for method in _METHODS:
             for sep in (" · ", " ", " - "):
@@ -648,9 +1141,9 @@ class RequestEditorDialog(QDialog):
                     text = text[len(prefix):].strip()
                     break
         if text.startswith(("http://", "https://")):
-            return RequestEditorDialog._path_from_url(text)
+            return RequestEditorPanel._path_from_url(text)
         if "://" in text:
-            return RequestEditorDialog._path_from_url(text)
+            return RequestEditorPanel._path_from_url(text)
         if "/" in text and not text.startswith("/"):
             slash = text.index("/")
             return text[slash:] or "/"
@@ -667,9 +1160,19 @@ class RequestEditorDialog(QDialog):
             f = g_item.font(0)
             f.setBold(True)
             g_item.setFont(0, f)
+            g_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDropEnabled
+            )
             for req in group.requests:
                 r_item = QTreeWidgetItem([self._request_tree_title(req)])
                 r_item.setData(0, Qt.ItemDataRole.UserRole, ("request", req.id))
+                r_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsDragEnabled
+                )
                 color = METHOD_COLORS.get(req.method, ("#cdd6f4", ""))[0]
                 r_item.setForeground(0, QColor(color))
                 r_item.setIcon(0, file_doc(color))
@@ -677,6 +1180,14 @@ class RequestEditorDialog(QDialog):
                 g_item.addChild(r_item)
             self._tree.addTopLevelItem(g_item)
             g_item.setExpanded(True)
+
+    def _on_request_dropped(self, request_id: str, target_group_id: str) -> None:
+        if not self._store.move_request(request_id, target_group_id):
+            return
+        if self._current_request_id == request_id:
+            self._current_group_id = target_group_id
+        self._persist()
+        self._reload_tree()
 
     def _on_group_expand_changed(self, item: QTreeWidgetItem) -> None:
         """Swap the group's arrow glyph to match its expanded state."""
@@ -749,6 +1260,8 @@ class RequestEditorDialog(QDialog):
         self._store.delete_request(request_id)
         if self._current_request_id == request_id:
             self._current_request_id = None
+            self._reset_response_pane()
+            self._configure_response_tabs_for_flow(None)
         self._persist()
         self._reload_tree()
 
@@ -757,7 +1270,8 @@ class RequestEditorDialog(QDialog):
     # ------------------------------------------------------------------ #
 
     def load_flow(self, flow: FlowModel) -> None:
-        """Populate the editor from a captured FlowModel (right-click → Edit)."""
+        """Populate request fields from a captured FlowModel."""
+        self._show_work_area()
         self._current_request_id = None
         self._current_group_id = None
         self._method_combo.setCurrentText(flow.method.upper())
@@ -793,9 +1307,13 @@ class RequestEditorDialog(QDialog):
         self._body_editor.setPlainText(body_text)
         self._name_input.setText(self._default_name_for_editor(flow.url))
         self._sync_params_from_url()
+        self._try_bind_saved_request_identity()
 
     def load_request(self, req: SavedRequest) -> None:
         """Populate the editor from a previously saved request."""
+        self._send_disabled = False
+        self._btn_send.setEnabled(True)
+        self._show_work_area()
         self._current_request_id = req.id
         found = self._store.find_request(req.id)
         self._current_group_id = found[0].id if found else None
@@ -808,7 +1326,21 @@ class RequestEditorDialog(QDialog):
         ])
         self._body_editor.setPlainText(req.body)
         self._name_input.setText(req.name.strip() or self._default_name_for_editor(req.url))
+        self._set_signer_id(req.signer_id)
         self._sync_params_from_url()
+        self._show_response_for_saved_request(req.id)
+
+    def _show_response_for_saved_request(self, request_id: str) -> None:
+        """Show persisted (or empty) last Send response for a saved request."""
+        found = self._store.find_request(request_id)
+        snap = found[1].last_response if found else None
+        if snap and snap.has_data:
+            flow = snap.to_flow_model(found[1])
+            self._display_captured_response(flow)
+            self._configure_response_tabs_for_flow(flow)
+        else:
+            self._reset_response_pane()
+            self._configure_response_tabs_for_flow(None)
 
     @staticmethod
     def _split_cookie_header(value: str):
@@ -968,6 +1500,58 @@ class RequestEditorDialog(QDialog):
             QMessageBox.information(self, tr("editor.format_json"), tr("editor.body.not_json"))
 
     # ------------------------------------------------------------------ #
+    # Signers (auth.json profiles)
+    # ------------------------------------------------------------------ #
+
+    def _reload_signer_combo(self, select_id: str = "") -> None:
+        from gui.icons import lock_icon
+
+        self._auth_store = AuthStore.load()
+        keep = select_id if select_id != "" else self._selected_signer_id()
+        self._signer_combo.blockSignals(True)
+        self._signer_combo.clear()
+        self._signer_combo.addItem(
+            lock_icon("#6c7086"), tr("editor.signer.short_none"), "")
+        for signer in self._auth_store.signers():
+            label = signer.name or signer.id
+            self._signer_combo.addItem(lock_icon("#f9e2af"), label, signer.id)
+        idx = self._signer_combo.findData(keep)
+        self._signer_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._signer_combo.setMaxVisibleItems(max(1, self._signer_combo.count()))
+        self._signer_combo.blockSignals(False)
+        self._update_signer_combo_appearance()
+
+    def _selected_signer_id(self) -> str:
+        data = self._signer_combo.currentData()
+        return str(data) if data else ""
+
+    def _set_signer_id(self, signer_id: str) -> None:
+        idx = self._signer_combo.findData(signer_id or "")
+        self._signer_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _apply_selected_signer(
+        self, headers: dict, body: bytes
+    ) -> Optional[Tuple[dict, bytes]]:
+        """Return (headers, body) after signing, or None if user should abort."""
+        signer_id = self._selected_signer_id()
+        if not signer_id:
+            return headers, body
+        config = self._auth_store.find(signer_id)
+        if config is None:
+            QMessageBox.warning(
+                self, tr("editor.signer.title"),
+                tr("editor.signer.not_found", id=signer_id),
+            )
+            return None
+        try:
+            return apply_signer(config, headers, body)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self, tr("editor.signer.title"), tr("editor.signer.failed", err=str(exc)),
+            )
+            return None
+
+    # ------------------------------------------------------------------ #
     # Sending
     # ------------------------------------------------------------------ #
 
@@ -993,6 +1577,8 @@ class RequestEditorDialog(QDialog):
         return headers, cookies
 
     def _send(self) -> None:
+        if self._send_disabled:
+            return
         url = self._url_input.text().strip()
         if not url:
             QMessageBox.information(self, tr("editor.send"), tr("editor.no_url"))
@@ -1005,6 +1591,11 @@ class RequestEditorDialog(QDialog):
         headers, cookies = self._collect_send_headers()
         body = self._body_editor.toPlainText().encode("utf-8")
 
+        signed = self._apply_selected_signer(headers, body)
+        if signed is None:
+            return
+        headers, body = signed
+
         self._btn_send.setEnabled(False)
         self._resp_status.setText(tr("editor.sending"))
 
@@ -1015,7 +1606,11 @@ class RequestEditorDialog(QDialog):
         worker.start()
 
     def _on_response_ready(self, flow: Optional[FlowModel], error: Optional[str]) -> None:
-        self._btn_send.setEnabled(True)
+        self._btn_send.setEnabled(not self._send_disabled)
+        self._configure_response_tabs_for_flow(
+            None if flow is None else flow)
+        if flow is not None and flow.flow_type != "websocket":
+            self._resp_tabs.setTabVisible(self._ws_tab_index, False)
         if error is not None or flow is None:
             self._resp_status.setText(tr("editor.error", err=error or "unknown"))
             self._resp_status.setStyleSheet(
@@ -1026,37 +1621,125 @@ class RequestEditorDialog(QDialog):
             self._resp_headers.set_headers({})
             return
 
-        sc = flow.status_code or 0
-        self._resp_status.setText(
-            tr("editor.response_status",
-               code=sc, reason=flow.status_message,
-               size=flow.format_size(), dur=flow.format_duration())
-        )
-        self._resp_status.setStyleSheet(
-            f"background:#181825; color:{status_color(sc)}; font-size:12px; padding:6px 12px;"
-            "border-bottom:1px solid #313244;"
-        )
-        self._resp_headers.set_headers(flow.response_headers)
-        if flow.is_image():
-            self._resp_body.set_body(
-                tr("body.binary_image", ctype=flow.content_type or "?", size=flow.format_size()),
-                is_json=False,
-            )
-        else:
-            text, is_json = flow.get_response_body_display()
-            self._resp_body.set_body(text, is_json=is_json)
+        self._display_captured_response(flow)
+        if flow.flow_type != "websocket":
+            text, _ = flow.get_response_body_display()
             if "登录失效" in text or '"errno": 4000' in text:
                 self._maybe_tip_auth_failure()
+        self._persist_last_response_for_current(flow)
+
+    def _persist_last_response_for_current(self, flow: FlowModel) -> None:
+        """Write last Send response onto the open saved request in collections.json."""
+        if not self._current_request_id:
+            return
+        found = self._store.find_request(self._current_request_id)
+        if not found:
+            return
+        _, req = found
+        req.last_response = SavedResponseSnapshot.from_flow(flow)
+        self._persist()
 
     def _maybe_tip_auth_failure(self) -> None:
         """Hint when the server rejects cookies (common after Chrome v20 encryption)."""
         QMessageBox.information(self, tr("editor.sync_cookie"), tr("editor.cookie.auth_tip"))
 
     # ------------------------------------------------------------------ #
+    # Saving — identity / duplicate matching
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _method_url_key(method: str, url: str) -> Tuple[str, str]:
+        return method.upper().strip(), url.strip()
+
+    @staticmethod
+    def _normalize_kv_rows(rows: List[tuple], *, normalize_values: bool = False) -> Tuple:
+        out = []
+        for en, key, value in rows:
+            key = str(key).strip()
+            if not key:
+                continue
+            val = normalize_cookie_value(value) if normalize_values else str(value)
+            out.append((bool(en), key, val))
+        return tuple(out)
+
+    def _editor_content_signature(self) -> Tuple:
+        return (
+            self._method_url_key(
+                self._method_combo.currentText(),
+                self._url_input.text(),
+            ),
+            self._normalize_kv_rows(self._headers_table.rows()),
+            self._normalize_kv_rows(self._cookies_table.rows(), normalize_values=True),
+            self._body_editor.toPlainText(),
+        )
+
+    @staticmethod
+    def _saved_content_signature(req: SavedRequest) -> Tuple:
+        return (
+            RequestEditorPanel._method_url_key(req.method, req.url),
+            RequestEditorPanel._normalize_kv_rows(req.headers),
+            RequestEditorPanel._normalize_kv_rows(req.cookies, normalize_values=True),
+            req.body,
+        )
+
+    def _iter_saved_requests(self) -> List[Tuple[RequestGroup, SavedRequest]]:
+        return [(g, r) for g in self._store.groups() for r in g.requests]
+
+    def _find_exact_matching_saved_request(self) -> Optional[Tuple[RequestGroup, SavedRequest]]:
+        sig = self._editor_content_signature()
+        for group, req in self._iter_saved_requests():
+            if self._saved_content_signature(req) == sig:
+                return group, req
+        return None
+
+    def _find_by_method_url(self, method: str, url: str) -> List[Tuple[RequestGroup, SavedRequest]]:
+        key = self._method_url_key(method, url)
+        return [
+            (g, r) for g, r in self._iter_saved_requests()
+            if self._method_url_key(r.method, r.url) == key
+        ]
+
+    def _resolve_save_target(self) -> Optional[Tuple[RequestGroup, SavedRequest]]:
+        """Pick an existing saved request to update, if the editor matches one."""
+        if self._current_request_id:
+            found = self._store.find_request(self._current_request_id)
+            if found:
+                return found
+        exact = self._find_exact_matching_saved_request()
+        if exact:
+            return exact
+        hits = self._find_by_method_url(
+            self._method_combo.currentText(),
+            self._url_input.text().strip(),
+        )
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
+    def _bind_saved_request(self, group: RequestGroup, req: SavedRequest) -> None:
+        self._current_request_id = req.id
+        self._current_group_id = group.id
+        if req.name.strip():
+            self._name_input.setText(req.name.strip())
+
+    def _try_bind_saved_request_identity(self) -> None:
+        """After loading from traffic, link to an existing saved entry when unambiguous."""
+        target = self._resolve_save_target()
+        if target is not None:
+            self._bind_saved_request(target[0], target[1])
+
+    # ------------------------------------------------------------------ #
     # Saving
     # ------------------------------------------------------------------ #
 
     def _build_saved_request(self, request_id: Optional[str]) -> SavedRequest:
+        last_response: Optional[SavedResponseSnapshot] = None
+        if self._flow_has_storable_response(self._last_response_flow):
+            last_response = SavedResponseSnapshot.from_flow(self._last_response_flow)
+        elif request_id:
+            found = self._store.find_request(request_id)
+            if found:
+                last_response = found[1].last_response
         return SavedRequest(
             id=request_id or SavedRequest().id,
             name=self._name_input.text().strip()
@@ -1066,37 +1749,81 @@ class RequestEditorDialog(QDialog):
             headers=self._headers_table.rows(),
             cookies=self._cookies_table.rows(),
             body=self._body_editor.toPlainText(),
+            last_response=last_response,
+            signer_id=self._selected_signer_id(),
         )
 
-    def _group_for_quick_save(self):
-        """Default group for first-time Save (no picker)."""
-        if self._last_save_group_id:
-            for g in self._store.groups():
-                if g.id == self._last_save_group_id:
-                    return g
-        if self._current_group_id:
-            for g in self._store.groups():
-                if g.id == self._current_group_id:
-                    return g
-        return self._store.ensure_default_group()
+    def _new_group_from_picker(self) -> Optional[str]:
+        """Create a group while the save picker is open; returns the new name."""
+        dlg = TextPromptDialog(tr("editor.new_group"), tr("editor.group_name"), parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        name = dlg.text()
+        if not name:
+            return None
+        group = self._store.add_group(name)
+        self._persist()
+        self._reload_tree()
+        return group.name
+
+    def _group_for_host_url(self) -> Optional[RequestGroup]:
+        """Find or create a collection group named after the request host."""
+        url = self._url_input.text().strip()
+        if not url:
+            QMessageBox.information(self, tr("editor.save"), tr("editor.no_url"))
+            return None
+        host = (urlparse(url).hostname or "").strip()
+        if not host:
+            QMessageBox.information(self, tr("editor.save"), tr("editor.no_url"))
+            return None
+        for group in self._store.groups():
+            if group.name == host:
+                return group
+        return self._store.add_group(host)
+
+    def _pick_save_group(self, title_key: str = "editor.save_as") -> Optional[RequestGroup]:
+        """Ask which group to save into (Save As only); returns RequestGroup or None if cancelled."""
+        groups = self._store.groups()
+        if not groups:
+            self._store.ensure_default_group()
+            groups = self._store.groups()
+        names = [g.name for g in groups]
+        dlg = GroupPickerDialog(
+            tr(title_key),
+            tr("editor.choose_group"),
+            names,
+            self,
+            new_group_label=tr("editor.picker.new_group"),
+            on_new_group=self._new_group_from_picker,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        choice = dlg.selected()
+        if not choice:
+            return None
+        groups = self._store.groups()
+        return next((g for g in groups if g.name == choice), groups[0] if groups else None)
 
     def _save(self) -> None:
-        """Update the open saved item, or first-time save into the default group."""
-        if self._current_request_id is not None:
-            req = self._build_saved_request(self._current_request_id)
+        """Update a matching saved item, or save into the host-named group (no dialog)."""
+        target = self._resolve_save_target()
+        if target is not None:
+            group, existing = target
+            req = self._build_saved_request(existing.id)
             if self._store.update_request(req):
-                if self._current_group_id:
-                    self._last_save_group_id = self._current_group_id
+                self._bind_saved_request(group, req)
+                self._last_save_group_id = group.id
                 self._persist()
                 self._reload_tree()
                 self._flash_saved()
             return
 
-        group = self._group_for_quick_save()
+        group = self._group_for_host_url()
+        if group is None:
+            return
         req = self._build_saved_request(None)
         self._store.add_request(group.id, req)
-        self._current_request_id = req.id
-        self._current_group_id = group.id
+        self._bind_saved_request(group, req)
         self._last_save_group_id = group.id
         self._persist()
         self._reload_tree()
@@ -1104,18 +1831,9 @@ class RequestEditorDialog(QDialog):
 
     def _save_as(self) -> None:
         """Always create a new saved request and pick the target group."""
-        groups = self._store.groups()
-        if not groups:
-            self._store.ensure_default_group()
-            groups = self._store.groups()
-        names = [g.name for g in groups]
-        dlg = GroupPickerDialog(tr("editor.save_as"), tr("editor.choose_group"), names, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        group = self._pick_save_group("editor.save_as")
+        if group is None:
             return
-        choice = dlg.selected()
-        if not choice:
-            return
-        group = next((g for g in groups if g.name == choice), groups[0])
         req = self._build_saved_request(None)
         self._store.add_request(group.id, req)
         self._current_request_id = req.id
@@ -1126,9 +1844,13 @@ class RequestEditorDialog(QDialog):
         self._flash_saved()
 
     def _flash_saved(self) -> None:
-        self.setWindowTitle(tr("editor.saved"))
         from PyQt6.QtCore import QTimer
-        QTimer.singleShot(1200, lambda: self.setWindowTitle(tr("editor.title")))
+        prev = self._resp_status.text()
+        self._resp_status.setText(tr("editor.saved"))
+        QTimer.singleShot(
+            1200,
+            lambda: self._resp_status.setText(prev or tr("editor.no_response")),
+        )
 
     def _persist(self) -> None:
         try:
@@ -1137,3 +1859,6 @@ class RequestEditorDialog(QDialog):
             pass
         if self._on_store_changed is not None:
             self._on_store_changed()
+
+
+RequestEditorDialog = RequestEditorPanel

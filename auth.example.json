@@ -1,0 +1,18 @@
+{
+  "signers": [
+    {
+      "id": "chenla_uc",
+      "name": "CHENGLA UC",
+      "type": "chenla_uc",
+      "private_key": "-----BEGIN RSA PRIVATE KEY-----\nPASTE_YOUR_KEY_HERE\n-----END RSA PRIVATE KEY-----",
+      "app_id": 6,
+      "platform": "CHENGLA-PHP",
+      "version": "PHP-0.0.1",
+      "sign_template": "{platform}-{version}-{signTime}-{nonce}",
+      "inject": {
+        "headers": true,
+        "body": true
+      }
+    }
+  ]
+}
