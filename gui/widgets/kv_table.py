@@ -13,6 +13,7 @@ from typing import List, Tuple
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QPushButton,
@@ -21,8 +22,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from gui.icons import close_x
+from gui.icons import close_x, ensure_kv_checkbox_check_image
 from gui.i18n import tr
+
+_KV_CHECK_QSS = """
+QCheckBox#kv_row_check::indicator:checked {
+    background-color: transparent;
+    border: none;
+    image: url("{check_img}");
+}
+"""
 
 KVRow = Tuple[bool, str, str]
 
@@ -41,6 +50,7 @@ class KeyValueTable(QWidget):
         self._suspend = False
 
         self._table = QTableWidget(0, 4, self)
+        self._table.setObjectName("kv_table")
         self._table.setHorizontalHeaderLabels(["", key_header, value_header, ""])
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(False)
@@ -51,16 +61,26 @@ class KeyValueTable(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 32)
+        self._table.setColumnWidth(0, 36)
         self._table.setColumnWidth(3, 36)
 
         self._table.cellChanged.connect(self._on_cell_changed)
+        self._apply_checkbox_styles()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._table)
 
         self._ensure_trailing_row()
+
+    def _apply_checkbox_styles(self) -> None:
+        try:
+            img = ensure_kv_checkbox_check_image()
+        except Exception:
+            img = ""
+        if img:
+            # Use replace — CSS braces must not go through str.format().
+            self.setStyleSheet(_KV_CHECK_QSS.replace("{check_img}", img))
 
     # ------------------------------------------------------------------ #
     # i18n
@@ -110,11 +130,17 @@ class KeyValueTable(QWidget):
         row = self._table.rowCount()
         self._table.insertRow(row)
 
-        check = QTableWidgetItem()
-        check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        check.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
-        check.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 0, check)
+        check_wrap = QWidget()
+        check_layout = QHBoxLayout(check_wrap)
+        check_layout.setContentsMargins(0, 0, 0, 0)
+        check_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cb = QCheckBox()
+        cb.setObjectName("kv_row_check")
+        cb.setChecked(enabled)
+        cb.stateChanged.connect(self._on_check_changed)
+        check_layout.addWidget(cb)
+        check_wrap._checkbox = cb  # type: ignore[attr-defined]
+        self._table.setCellWidget(row, 0, check_wrap)
 
         self._table.setItem(row, 1, QTableWidgetItem(key))
         self._table.setItem(row, 2, QTableWidgetItem(value))
@@ -138,17 +164,17 @@ class KeyValueTable(QWidget):
                 return
 
     def _ensure_trailing_row(self) -> None:
-        """Guarantee exactly one empty editable row at the end."""
+        """Guarantee exactly one empty, unchecked editable row at the end."""
         self._suspend = True
         try:
             count = self._table.rowCount()
             if count == 0:
-                self._append_row(True, "", "")
+                self._append_row(False, "", "")
                 return
             last_key = self._cell_text(count - 1, 1)
             last_val = self._cell_text(count - 1, 2)
             if last_key or last_val:
-                self._append_row(True, "", "")
+                self._append_row(False, "", "")
         finally:
             self._suspend = False
 
@@ -156,16 +182,38 @@ class KeyValueTable(QWidget):
     # Slots / helpers
     # ------------------------------------------------------------------ #
 
-    def _on_cell_changed(self, _row: int, _col: int) -> None:
+    def _on_check_changed(self, _state: int) -> None:
         if self._suspend:
             return
+        self.changed.emit()
+
+    def _on_cell_changed(self, row: int, col: int) -> None:
+        if self._suspend:
+            return
+        if col in (1, 2) and (self._cell_text(row, 1) or self._cell_text(row, 2)):
+            self._set_row_checked(row, True)
         self._ensure_trailing_row()
         self.changed.emit()
+
+    def _set_row_checked(self, row: int, checked: bool) -> None:
+        wrap = self._table.cellWidget(row, 0)
+        if wrap is None:
+            return
+        cb = getattr(wrap, "_checkbox", None)
+        if cb is not None and cb.isChecked() != checked:
+            self._suspend = True
+            try:
+                cb.setChecked(checked)
+            finally:
+                self._suspend = False
 
     def _cell_text(self, row: int, col: int) -> str:
         item = self._table.item(row, col)
         return item.text().strip() if item is not None else ""
 
     def _is_checked(self, row: int) -> bool:
-        item = self._table.item(row, 0)
-        return item is not None and item.checkState() == Qt.CheckState.Checked
+        wrap = self._table.cellWidget(row, 0)
+        if wrap is None:
+            return False
+        cb = getattr(wrap, "_checkbox", None)
+        return bool(cb.isChecked()) if cb is not None else False

@@ -319,6 +319,35 @@ QComboBox QAbstractItemView::item:hover {
     color: #11111b;
 }
 
+/* ── Key/value tables (request editor Params / Headers / Cookies) ── */
+QCheckBox#kv_row_check {
+    background: transparent;
+    spacing: 0;
+}
+QCheckBox#kv_row_check::indicator {
+    width: 15px;
+    height: 15px;
+    border-radius: 3px;
+    border: 1px solid #6c7086;
+    background-color: #11111b;
+}
+QCheckBox#kv_row_check::indicator:hover {
+    border-color: #89b4fa;
+}
+QCheckBox#kv_row_check::indicator:checked {
+    border-color: #89b4fa;
+    /* White check on blue tile — image set at runtime in KeyValueTable */
+}
+QTableWidget#kv_table {
+    background-color: #1e1e2e;
+    alternate-background-color: #181825;
+    gridline-color: transparent;
+    border: none;
+    color: #cdd6f4;
+    selection-background-color: #313244;
+    selection-color: #cdd6f4;
+}
+
 /* ── Table ───────────────────────────────────────────────────────── */
 QTableView {
     background-color: #1e1e2e;

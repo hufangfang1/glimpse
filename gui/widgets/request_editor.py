@@ -269,6 +269,8 @@ class RequestEditorDialog(QDialog):
         self._on_store_changed = on_store_changed
         # The saved request currently bound to the editor (None = unsaved draft).
         self._current_request_id: Optional[str] = None
+        self._current_group_id: Optional[str] = None
+        self._last_save_group_id: Optional[str] = None
         self._suspend_sync = False
 
         self.setWindowFlag(Qt.WindowType.Window, True)
@@ -355,7 +357,7 @@ class RequestEditorDialog(QDialog):
         popup.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         popup.setFrameShape(QListView.Shape.NoFrame)
         self._method_combo.setView(popup)
-        self._method_combo.setMaxVisibleItems(len(_METHODS))
+        self._method_combo.setMaxVisibleItems(max(len(_METHODS), 12))
         self._method_combo.setItemDelegate(_MethodDelegate(self._method_combo))
         self._method_combo.currentIndexChanged.connect(
             lambda _i: self._apply_method_combo_style())
@@ -383,12 +385,14 @@ class RequestEditorDialog(QDialog):
     def _build_save_bar(self):
         bar = QHBoxLayout()
         bar.setSpacing(6)
+        self._name_label = QLabel()
         self._name_input = QLineEdit()
-        self._name_input.setFixedWidth(220)
+        self._name_input.setMinimumWidth(160)
         self._btn_save = QPushButton()
         self._btn_save.clicked.connect(self._save)
         self._btn_save_as = QPushButton()
         self._btn_save_as.clicked.connect(self._save_as)
+        bar.addWidget(self._name_label)
         bar.addWidget(self._name_input, 1)
         bar.addWidget(self._btn_save)
         bar.addWidget(self._btn_save_as)
@@ -476,9 +480,13 @@ class RequestEditorDialog(QDialog):
         self.setWindowTitle(tr("editor.title"))
         self._btn_new_group.setText(tr("editor.new_group"))
         self._btn_send.setText(tr("editor.send"))
+        self._name_label.setText(tr("editor.name.label"))
         self._name_input.setPlaceholderText(tr("editor.name.placeholder"))
+        self._name_input.setToolTip(tr("editor.name.tooltip"))
         self._btn_save.setText(tr("editor.save"))
+        self._btn_save.setToolTip(tr("editor.save.tooltip"))
         self._btn_save_as.setText(tr("editor.save_as"))
+        self._btn_save_as.setToolTip(tr("editor.save_as.tooltip"))
         self._btn_sync_cookie.setText(tr("editor.sync_cookie"))
         self._act_cookie_captured.setText(tr("editor.cookie.captured"))
         self._act_cookie_chrome.setText(tr("editor.cookie.chrome"))
@@ -575,7 +583,9 @@ class RequestEditorDialog(QDialog):
         """)
 
     def _fit_method_popup(self) -> None:
-        """Shrink the method dropdown to fit its rows (no empty area below)."""
+        """Size the method dropdown to exactly fit all items — no scrollbar."""
+        from PyQt6.QtWidgets import QScrollBar
+
         combo = self._method_combo
         view = combo.view()
         if view is None:
@@ -583,43 +593,68 @@ class RequestEditorDialog(QDialog):
         n = max(1, combo.count())
         row_h = view.sizeHintForRow(0)
         if row_h <= 0:
-            row_h = 26
-        pad = view.frameWidth() * 2 + 8
+            row_h = 28
+        pad = 8
         h = row_h * n + pad
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         view.setFixedHeight(h)
+        view.setMinimumHeight(h)
+        view.setMaximumHeight(h)
         popup = view.window()
         w = max(combo.width(), 108)
-        popup.setFixedSize(w, h + popup.frameWidth() * 2)
+        frame = popup.frameWidth() * 2
+        popup.setFixedSize(w, h + frame)
+        for bar in popup.findChildren(QScrollBar):
+            bar.setVisible(False)
 
     @staticmethod
-    def _request_display_name(req: SavedRequest) -> str:
-        """Strip a leading verb from the saved name — the tree adds method separately."""
-        name = (req.name or "New Request").strip()
-        m = req.method.upper()
-        u = name.upper()
-        if u == m:
-            return "New Request"
-        for sep in (" · ", " ", " - "):
-            prefix = m + sep
-            if u.startswith(prefix):
-                rest = name[len(prefix):].strip()
-                return rest or name
-        if u.startswith(m) and len(name) > len(req.method):
-            ch = name[len(req.method)]
-            if ch in " ·-/":
-                rest = name[len(req.method):].lstrip(" ·-/")
-                return rest or name
-        return name
+    def _path_from_url(url: str) -> str:
+        """Path + query only (no scheme/host) for display names."""
+        parsed = urlparse((url or "").strip())
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        return path[:120]
 
     @staticmethod
     def _request_tree_title(req: SavedRequest) -> str:
-        return f"{req.method}  ·  {RequestEditorDialog._request_display_name(req)}"
+        """Label in the collections tree — uses saved name, else path from URL."""
+        name = (req.name or "").strip()
+        if name:
+            return name
+        if (req.url or "").strip():
+            return RequestEditorDialog._path_from_url(req.url)
+        return RequestEditorDialog._path_from_legacy_name(req.name)
 
     @staticmethod
-    def _default_request_name(flow: FlowModel) -> str:
-        path = flow.path or "/"
-        host = flow.host or ""
-        return (f"{host}{path}" if host else path)[:80]
+    def _default_name_for_editor(url: str = "") -> str:
+        """Initial value for the name field (path only, no host/method)."""
+        if url.strip():
+            return RequestEditorDialog._path_from_url(url)
+        return "/"
+
+    @staticmethod
+    def _path_from_legacy_name(name: str) -> str:
+        """Best-effort path for older saves that stored method/host in ``name``."""
+        text = (name or "").strip() or "/"
+        if text.startswith(("http://", "https://")):
+            return RequestEditorDialog._path_from_url(text)
+        upper = text.upper()
+        for method in _METHODS:
+            for sep in (" · ", " ", " - "):
+                prefix = f"{method}{sep}"
+                if upper.startswith(prefix):
+                    text = text[len(prefix):].strip()
+                    break
+        if text.startswith(("http://", "https://")):
+            return RequestEditorDialog._path_from_url(text)
+        if "://" in text:
+            return RequestEditorDialog._path_from_url(text)
+        if "/" in text and not text.startswith("/"):
+            slash = text.index("/")
+            return text[slash:] or "/"
+        return text if text.startswith("/") else f"/{text}"
 
     def _reload_tree(self) -> None:
         from PyQt6.QtGui import QColor
@@ -724,6 +759,7 @@ class RequestEditorDialog(QDialog):
     def load_flow(self, flow: FlowModel) -> None:
         """Populate the editor from a captured FlowModel (right-click → Edit)."""
         self._current_request_id = None
+        self._current_group_id = None
         self._method_combo.setCurrentText(flow.method.upper())
         self._apply_method_combo_style()
         self._url_input.setText(flow.url)
@@ -755,12 +791,14 @@ class RequestEditorDialog(QDialog):
 
         body_text = flow.get_request_body_text() if flow.request_body else ""
         self._body_editor.setPlainText(body_text)
-        self._name_input.setText(self._default_request_name(flow))
+        self._name_input.setText(self._default_name_for_editor(flow.url))
         self._sync_params_from_url()
 
     def load_request(self, req: SavedRequest) -> None:
         """Populate the editor from a previously saved request."""
         self._current_request_id = req.id
+        found = self._store.find_request(req.id)
+        self._current_group_id = found[0].id if found else None
         self._method_combo.setCurrentText(req.method.upper())
         self._apply_method_combo_style()
         self._url_input.setText(req.url)
@@ -769,7 +807,7 @@ class RequestEditorDialog(QDialog):
             (en, k, normalize_cookie_value(v)) for en, k, v in req.cookies
         ])
         self._body_editor.setPlainText(req.body)
-        self._name_input.setText(req.name)
+        self._name_input.setText(req.name.strip() or self._default_name_for_editor(req.url))
         self._sync_params_from_url()
 
     @staticmethod
@@ -1021,7 +1059,8 @@ class RequestEditorDialog(QDialog):
     def _build_saved_request(self, request_id: Optional[str]) -> SavedRequest:
         return SavedRequest(
             id=request_id or SavedRequest().id,
-            name=self._name_input.text().strip() or "New Request",
+            name=self._name_input.text().strip()
+                   or self._default_name_for_editor(self._url_input.text().strip()),
             method=self._method_combo.currentText(),
             url=self._url_input.text().strip(),
             headers=self._headers_table.rows(),
@@ -1029,18 +1068,42 @@ class RequestEditorDialog(QDialog):
             body=self._body_editor.toPlainText(),
         )
 
+    def _group_for_quick_save(self):
+        """Default group for first-time Save (no picker)."""
+        if self._last_save_group_id:
+            for g in self._store.groups():
+                if g.id == self._last_save_group_id:
+                    return g
+        if self._current_group_id:
+            for g in self._store.groups():
+                if g.id == self._current_group_id:
+                    return g
+        return self._store.ensure_default_group()
+
     def _save(self) -> None:
-        # Update in place if bound to an existing saved request; else fall to Save As.
+        """Update the open saved item, or first-time save into the default group."""
         if self._current_request_id is not None:
             req = self._build_saved_request(self._current_request_id)
             if self._store.update_request(req):
+                if self._current_group_id:
+                    self._last_save_group_id = self._current_group_id
                 self._persist()
                 self._reload_tree()
                 self._flash_saved()
-                return
-        self._save_as()
+            return
+
+        group = self._group_for_quick_save()
+        req = self._build_saved_request(None)
+        self._store.add_request(group.id, req)
+        self._current_request_id = req.id
+        self._current_group_id = group.id
+        self._last_save_group_id = group.id
+        self._persist()
+        self._reload_tree()
+        self._flash_saved()
 
     def _save_as(self) -> None:
+        """Always create a new saved request and pick the target group."""
         groups = self._store.groups()
         if not groups:
             self._store.ensure_default_group()
@@ -1056,6 +1119,8 @@ class RequestEditorDialog(QDialog):
         req = self._build_saved_request(None)
         self._store.add_request(group.id, req)
         self._current_request_id = req.id
+        self._current_group_id = group.id
+        self._last_save_group_id = group.id
         self._persist()
         self._reload_tree()
         self._flash_saved()

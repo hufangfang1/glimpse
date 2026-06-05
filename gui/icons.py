@@ -85,6 +85,43 @@ def chevron_right(color: str = "#a6adc8", size: int = 12) -> QIcon:
     return _draw_icon(size, draw)
 
 
+def _check_mark_pixmap(size: int = 16, bg: str = "#89b4fa", fg: str = "#1e1e2e") -> QPixmap:
+    """Small rounded square with a check stroke — for KV table row toggles."""
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QPainterPath
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    radius = size * 0.2
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), radius, radius)
+    painter.fillPath(path, QColor(bg))
+    pen = QPen(QColor(fg), max(1.6, size * 0.12), Qt.PenStyle.SolidLine,
+               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    # Check mark: short down stroke, longer up-right stroke.
+    x0, y0 = size * 0.22, size * 0.52
+    x1, y1 = size * 0.42, size * 0.72
+    x2, y2 = size * 0.78, size * 0.30
+    painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+    painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+    painter.end()
+    return pixmap
+
+
+def ensure_kv_checkbox_check_image() -> str:
+    """PNG path for QSS ``image: url(...)`` on checked KV row checkboxes."""
+    from pathlib import Path
+
+    cache_dir = Path.home() / ".glimpse" / "icons"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / "kv_check.png"
+    _check_mark_pixmap(16).save(str(path), "PNG")
+    return str(path).replace("\\", "/")
+
+
 def close_x(color: str = "#a6adc8", size: int = 14) -> QIcon:
     c = QColor(color)
 
