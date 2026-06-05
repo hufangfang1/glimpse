@@ -195,3 +195,5 @@ glimpse/
 本项目采用 [MIT License](LICENSE) 开源。
 
 GUI 依赖 [PyQt6](https://www.riverbankcomputing.com/software/pyqt/)（GPL v3 或商业授权）。若你**打包分发** macOS 应用，请自行确认是否符合 PyQt6 的许可要求。
+
+
