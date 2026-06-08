@@ -8,7 +8,6 @@ import uuid
 from queue import Empty
 from typing import Dict, Optional
 
-import httpx
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
@@ -24,6 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from proxy.http_client import make_client
 from proxy.models import FlowModel
 from proxy.scope import Scope
 from proxy.server import ProxyServer
@@ -612,7 +612,7 @@ class MainWindow(QMainWindow):
         def _do_replay() -> None:
             replay_id = f"{flow.id}_replay_{uuid.uuid4().hex[:8]}"
             try:
-                with httpx.Client(verify=False, follow_redirects=True, timeout=30) as client:
+                with make_client(flow.url) as client:
                     req = client.build_request(
                         method=flow.method,
                         url=flow.url,

@@ -23,7 +23,6 @@ import uuid
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
-import httpx
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
@@ -71,6 +70,7 @@ from proxy.cookies import (
     cookie_value_for_wire,
     normalize_cookie_value,
 )
+from proxy.http_client import make_client
 from proxy.models import FlowModel
 from gui.i18n import i18n, tr
 from gui.icons import file_doc
@@ -153,7 +153,7 @@ class _SendWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            with httpx.Client(verify=False, follow_redirects=True, timeout=30) as client:
+            with make_client(self._url) as client:
                 req = client.build_request(
                     method=self._method,
                     url=self._url,
