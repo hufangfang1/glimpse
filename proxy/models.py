@@ -5,11 +5,98 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import shlex
 import zlib
 from dataclasses import dataclass, field
+from html import unescape
+from html.parser import HTMLParser
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
+
+class _ReadableHtmlParser(HTMLParser):
+    """Extract visible text from an HTML error page without the CSS/JS noise."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "template", "svg"}
+    _BLOCK_TAGS = {
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl",
+        "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+        "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p",
+        "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr",
+        "ul",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._in_title = False
+        self._title_parts: list[str] = []
+        self._parts: list[str] = []
+
+    @property
+    def title(self) -> str:
+        return self._clean_text(" ".join(self._title_parts))
+
+    @property
+    def body_text(self) -> str:
+        text = self._clean_text(" ".join(self._parts))
+        return self._dedupe_lines(text)
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if tag == "title":
+            self._in_title = True
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if tag == "title":
+            self._in_title = False
+            return
+        if tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if self._in_title:
+            self._title_parts.append(data)
+        else:
+            self._parts.append(data)
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        text = unescape(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[ \t\f\v]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _dedupe_lines(text: str) -> str:
+        lines: list[str] = []
+        previous = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                if lines and lines[-1]:
+                    lines.append("")
+                continue
+            if stripped == previous:
+                continue
+            lines.append(stripped)
+            previous = stripped
+        return "\n".join(lines).strip()
 
 
 @dataclass
@@ -155,6 +242,103 @@ class FlowModel:
         except Exception:
             return text, False
 
+    @staticmethod
+    def _body_looks_like_html(text: str) -> bool:
+        stripped = text.lstrip()[:512].lower()
+        if stripped.startswith(("<!doctype html", "<html")):
+            return True
+        return bool(re.search(r"<(html|head|body|title|h1|div|span|p)\b", stripped))
+
+    @classmethod
+    def _readable_html(cls, text: str) -> str:
+        parser = _ReadableHtmlParser()
+        try:
+            parser.feed(text)
+            parser.close()
+        except Exception:
+            return text
+
+        parts: list[str] = []
+        summary = cls._html_error_summary(text, parser.body_text)
+        if summary:
+            parts.append(summary)
+        if parser.title:
+            parts.append(f"HTML error title:\n{parser.title}")
+        if parser.body_text:
+            parts.append(f"HTML error text:\n{parser.body_text}")
+
+        if not parts:
+            return text
+
+        summary = "\n\n".join(parts)
+        return f"{summary}\n\n----- Raw HTML -----\n{text}"
+
+    @classmethod
+    def _html_error_summary(cls, html_text: str, body_text: str) -> str:
+        """Put the useful framework exception bits before the full text dump."""
+        fragments: list[str] = []
+
+        exception = cls._first_html_class_text(html_text, "exception_title")
+        message = cls._first_html_class_text(html_text, "exception_message")
+
+        if exception:
+            fragments.append(exception.rstrip(":").strip())
+        if message and message not in fragments:
+            fragments.append(message.strip())
+
+        if not fragments:
+            lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+            for idx, line in enumerate(lines):
+                if re.search(r"\b(Error|Exception|Throwable)\b", line):
+                    fragments.append(line.rstrip(":").strip())
+                    if idx + 1 < len(lines):
+                        next_line = lines[idx + 1].strip()
+                        if next_line and not next_line.lower().startswith("at "):
+                            fragments.append(next_line)
+                    break
+
+        if not fragments:
+            return ""
+
+        trace_lines = cls._first_stack_lines(body_text, limit=5)
+        out = ["HTML error summary:", *fragments]
+        if trace_lines:
+            out.extend(["", "First stack lines:", *trace_lines])
+        return "\n".join(out)
+
+    @classmethod
+    def _first_html_class_text(cls, html_text: str, class_name: str) -> str:
+        pattern = (
+            rf"<(?P<tag>[a-z0-9]+)[^>]*\bclass=[\"'][^\"']*\b{re.escape(class_name)}\b"
+            rf"[^\"']*[\"'][^>]*>(.*?)</(?P=tag)>"
+        )
+        match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return ""
+        return cls._strip_html_fragment(match.group(2))
+
+    @staticmethod
+    def _strip_html_fragment(fragment: str) -> str:
+        fragment = re.sub(r"<(script|style|noscript|template)\b.*?</\1>", "", fragment,
+                          flags=re.IGNORECASE | re.DOTALL)
+        fragment = re.sub(r"<[^>]+>", " ", fragment)
+        fragment = unescape(fragment)
+        fragment = re.sub(r"\s+", " ", fragment)
+        return fragment.strip()
+
+    @staticmethod
+    def _first_stack_lines(body_text: str, limit: int = 5) -> list[str]:
+        trace: list[str] = []
+        for line in body_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith(("at ", "in ")):
+                trace.append(line)
+            if len(trace) >= limit:
+                break
+        return trace
+
     def _decode_body(self, raw: bytes, encoding_header: str, content_type: str) -> tuple[str, bool]:
         body = self._decompress(raw, encoding_header)
         text = body.decode("utf-8", errors="replace")
@@ -169,6 +353,9 @@ class FlowModel:
                 return json.dumps(parsed, indent=2, ensure_ascii=False), True
             except Exception:
                 pass
+
+        if self._is_html_content_type(content_type) or self._body_looks_like_html(text):
+            return self._readable_html(text), False
 
         return text, False
 
@@ -208,6 +395,10 @@ class FlowModel:
     def _is_json_content_type(content_type: str) -> bool:
         return "json" in content_type.lower()
 
+    @staticmethod
+    def _is_html_content_type(content_type: str) -> bool:
+        return "html" in content_type.lower()
+
     def is_image(self) -> bool:
         return self.content_type.startswith("image/")
 
@@ -218,7 +409,7 @@ class FlowModel:
         return self._is_json_content_type(self.request_content_type)
 
     def is_html(self) -> bool:
-        return "html" in self.content_type
+        return self._is_html_content_type(self.content_type)
 
     # ------------------------------------------------------------------ #
     # Export helpers
