@@ -13,6 +13,7 @@ from html import unescape
 from html.parser import HTMLParser
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, unquote_plus
 
 
 class _ReadableHtmlParser(HTMLParser):
@@ -357,6 +358,9 @@ class FlowModel:
         if self._is_html_content_type(content_type) or self._body_looks_like_html(text):
             return self._readable_html(text), False
 
+        if "application/x-www-form-urlencoded" in content_type or self._body_looks_like_form(text):
+            return self._decode_form(text), False
+
         return text, False
 
     def get_request_body_text(self) -> str:
@@ -398,6 +402,20 @@ class FlowModel:
     @staticmethod
     def _is_html_content_type(content_type: str) -> bool:
         return "html" in content_type.lower()
+
+    @staticmethod
+    def _body_looks_like_form(text: str) -> bool:
+        """Heuristic: key=value(&key=value)* with percent-encoding."""
+        if not text or "\n" in text or " " in text.split("=")[0]:
+            return False
+        return "=" in text and "%" in text
+
+    @staticmethod
+    def _decode_form(text: str) -> str:
+        pairs = parse_qsl(text, keep_blank_values=True)
+        if pairs:
+            return "\n".join(f"{k} = {v}" for k, v in pairs)
+        return unquote_plus(text)
 
     def is_image(self) -> bool:
         return self.content_type.startswith("image/")

@@ -21,7 +21,7 @@ import json
 import threading
 import uuid
 from typing import Callable, List, Optional, Tuple
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl, unquote_plus
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
@@ -82,6 +82,16 @@ _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 
 _EDITOR_CONTROL_HEIGHT = CONTROL_HEIGHT
+
+
+def _decode_body_text(body: str) -> str:
+    """Decode URL-encoded form body into readable key = value lines."""
+    if not body or "%" not in body or "\n" in body:
+        return body
+    pairs = parse_qsl(body, keep_blank_values=True)
+    if pairs:
+        return "\n".join(f"{k} = {v}" for k, v in pairs)
+    return unquote_plus(body)
 
 
 class _ComboPopupNoScrollFilter(QObject):
@@ -1324,7 +1334,7 @@ class RequestEditorPanel(QWidget):
         self._cookies_table.set_rows([
             (en, k, normalize_cookie_value(v)) for en, k, v in req.cookies
         ])
-        self._body_editor.setPlainText(req.body)
+        self._body_editor.setPlainText(_decode_body_text(req.body))
         self._name_input.setText(req.name.strip() or self._default_name_for_editor(req.url))
         self._set_signer_id(req.signer_id)
         self._sync_params_from_url()
