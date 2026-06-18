@@ -273,6 +273,8 @@ _EN: Dict[str, str] = {
     "editor.cookie.auth_tip": "Login was rejected even though cookies were sent. Try:\n\n1. Set the method to GET if you opened this URL in the browser address bar.\n2. Start Glimpse proxy, visit the site in Chrome with the system proxy enabled, then use Sync Cookies → \"From captured traffic\" — this copies the exact Cookie header the browser sent.\n3. Avoid re-syncing from Chrome if PHPSESSID is missing or looks wrong.",
     "editor.format_json": "Format JSON",
     "editor.body.not_json": "Body is not valid JSON.",
+    "editor.body.mode_form": "Form",
+    "editor.body.mode_json": "JSON",
 }
 
 
@@ -507,6 +509,8 @@ _ZH: Dict[str, str] = {
     "editor.cookie.auth_tip": "服务端返回「登录失效」，说明 Cookie 未通过校验。建议：\n\n1. 若在浏览器地址栏直接打开该链接，请把请求方式改为 GET（不要用 POST）。\n2. 启动 Glimpse 抓包，Chrome 走系统代理后重新打开该页面，再用「同步 Cookie → 从抓包流量提取」——与浏览器发出的 Cookie 完全一致。\n3. 不要依赖「从 Chrome 读取」补齐 PHPSESSID（新版 Chrome 往往读不到）。",
     "editor.format_json": "格式化 JSON",
     "editor.body.not_json": "Body 不是合法的 JSON。",
+    "editor.body.mode_form": "表单",
+    "editor.body.mode_json": "JSON",
 }
 
 
