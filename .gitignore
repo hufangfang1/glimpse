@@ -11,3 +11,4 @@ Glimpse.app/
 # Pre-rename artefact, kept ignored so old checkouts don't accidentally commit it.
 Proxyman.app/
 assets/AppIcon.iconset/
+./claude

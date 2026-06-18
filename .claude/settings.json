@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(claude -p \"请用中文描述这张图片的内容，包括：界面上有什么文字、按钮、选项？这是一个什么界面？\" --image /tmp/clipboard_image.png)",
+      "Bash(claude -p \"请用中文描述 @/tmp/clipboard_image.png 这张图片的内容，图片里有什么界面、文字、按钮、选项？\")",
+      "Bash(claude -p \"请用中文描述 /tmp/clipboard_clean.jpg 这张图片的内容，图片里有什么界面元素、文字、按钮或选项？\")"
+    ]
+  }
+}
