@@ -374,6 +374,19 @@ class FlowModel:
         enc = self._header_value(self.request_headers, "content-encoding")
         return self._decode_body(self.request_body, enc, ct)
 
+    def get_request_body_raw_text(self) -> str:
+        """Decoded request body WITHOUT form/JSON prettification.
+
+        Used when loading a captured request into the editor, where the raw
+        wire text (e.g. ``a=1&b=2``) is needed so the Body editor can parse it
+        into its own form grid instead of re-parsing prettified output.
+        """
+        if not self.request_body:
+            return ""
+        enc = self._header_value(self.request_headers, "content-encoding")
+        body = self._decompress(self.request_body, enc)
+        return body.decode("utf-8", errors="replace")
+
     def get_response_body_text(self) -> str:
         text, _ = self.get_response_body_display()
         return text

@@ -21,7 +21,7 @@ import json
 import threading
 import uuid
 from typing import Callable, List, Optional, Tuple
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl, unquote_plus
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
@@ -82,16 +82,6 @@ _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 
 _EDITOR_CONTROL_HEIGHT = CONTROL_HEIGHT
-
-
-def _decode_body_text(body: str) -> str:
-    """Decode URL-encoded form body into readable key = value lines."""
-    if not body or "%" not in body or "\n" in body:
-        return body
-    pairs = parse_qsl(body, keep_blank_values=True)
-    if pairs:
-        return "\n".join(f"{k} = {v}" for k, v in pairs)
-    return unquote_plus(body)
 
 
 class _ComboPopupNoScrollFilter(QObject):
@@ -215,6 +205,136 @@ class BodyEditor(QPlainTextEdit):
             return False
         self.setPlainText(json.dumps(parsed, indent=2, ensure_ascii=False))
         return True
+
+
+class RequestBodyEditor(QWidget):
+    """Body editor with a Form / JSON mode switch.
+
+    Form mode edits ``application/x-www-form-urlencoded`` pairs in a key/value
+    grid; JSON mode is a monospace text editor (it also doubles as a raw text
+    editor for non-JSON bodies). Both round-trip through a single ``body``
+    string plus the request's Content-Type header, so nothing extra needs to be
+    persisted. The two editors keep their own content independently, so toggling
+    modes never discards what the user typed in the other.
+    """
+
+    MODE_FORM = "form"
+    MODE_JSON = "json"
+
+    _MODE_QSS = """
+    QPushButton#body_mode_btn {
+        padding: 3px 16px; border: 1px solid #313244;
+        background: #181825; color: #a6adc8;
+    }
+    QPushButton#body_mode_btn:checked {
+        background: #313244; color: #cdd6f4; border-color: #585b70;
+    }
+    """
+
+    mode_changed = pyqtSignal(str)   # user switched mode (not on programmatic load)
+    format_failed = pyqtSignal()     # Format JSON pressed but body isn't JSON
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._mode = self.MODE_JSON
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        bar = QHBoxLayout()
+        self._btn_form = QPushButton()
+        self._btn_json = QPushButton()
+        for b in (self._btn_form, self._btn_json):
+            b.setObjectName("body_mode_btn")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
+        self._btn_form.clicked.connect(lambda: self.set_mode(self.MODE_FORM))
+        self._btn_json.clicked.connect(lambda: self.set_mode(self.MODE_JSON))
+        bar.addWidget(self._btn_form)
+        bar.addWidget(self._btn_json)
+        bar.addStretch()
+        self._btn_format = QPushButton()
+        self._btn_format.setFixedWidth(120)
+        self._btn_format.clicked.connect(self._on_format_clicked)
+        bar.addWidget(self._btn_format)
+        layout.addLayout(bar)
+
+        self._stack = QStackedWidget()
+        self._json_editor = BodyEditor()
+        self._form_table = KeyValueTable()
+        self._stack.addWidget(self._json_editor)   # index 0 — JSON / raw
+        self._stack.addWidget(self._form_table)    # index 1 — Form grid
+        layout.addWidget(self._stack, 1)
+
+        self._json_editor.textChanged.connect(self.changed)
+        self._form_table.changed.connect(self.changed)
+
+        self.setStyleSheet(self._MODE_QSS)
+        self._apply_mode_ui()
+        self.retranslate()
+
+    # ----------------------------- public API ----------------------------- #
+
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str, *, silent: bool = False) -> None:
+        if mode not in (self.MODE_FORM, self.MODE_JSON):
+            return
+        changed = mode != self._mode
+        self._mode = mode
+        self._apply_mode_ui()
+        if changed and not silent:
+            self.mode_changed.emit(mode)
+            self.changed.emit()
+
+    def set_body(self, body: str, content_type: str = "") -> None:
+        """Load a body string, picking the mode from the Content-Type header."""
+        if "x-www-form-urlencoded" in (content_type or "").lower():
+            pairs = parse_qsl(body, keep_blank_values=True) if body else []
+            self._form_table.set_rows([(True, k, v) for k, v in pairs])
+            self._json_editor.setPlainText("")
+            self.set_mode(self.MODE_FORM, silent=True)
+        else:
+            self._json_editor.setPlainText(body)
+            self._form_table.set_rows([])
+            self.set_mode(self.MODE_JSON, silent=True)
+
+    def body_text(self) -> str:
+        """Serialize the active mode back to a wire-ready body string."""
+        if self._mode == self.MODE_FORM:
+            pairs = [(k, v) for _en, k, v in self._form_table.rows(enabled_only=True)]
+            return urlencode(pairs)
+        return self._json_editor.toPlainText()
+
+    def clear(self) -> None:
+        self._json_editor.clear()
+        self._form_table.set_rows([])
+        self.set_mode(self.MODE_JSON, silent=True)
+
+    def format_json(self) -> bool:
+        return self._json_editor.format_json()
+
+    def retranslate(self) -> None:
+        self._btn_form.setText(tr("editor.body.mode_form"))
+        self._btn_json.setText(tr("editor.body.mode_json"))
+        self._btn_format.setText(tr("editor.format_json"))
+
+    # ------------------------------ internals ----------------------------- #
+
+    def _apply_mode_ui(self) -> None:
+        is_form = self._mode == self.MODE_FORM
+        self._btn_form.setChecked(is_form)
+        self._btn_json.setChecked(not is_form)
+        self._stack.setCurrentWidget(self._form_table if is_form else self._json_editor)
+        self._btn_format.setVisible(not is_form)
+
+    def _on_format_clicked(self) -> None:
+        if not self.format_json():
+            self.format_failed.emit()
 
 
 class GroupPickerDialog(QDialog):
@@ -657,25 +777,15 @@ class RequestEditorPanel(QWidget):
         cw.addLayout(cookie_bar)
         cw.addWidget(self._cookies_table)
 
-        # Body tab: format button + editable text.
-        body_wrap = QWidget()
-        bw = QVBoxLayout(body_wrap)
-        bw.setContentsMargins(0, 0, 0, 0)
-        bw.setSpacing(4)
-        body_bar = QHBoxLayout()
-        self._btn_format = QPushButton()
-        self._btn_format.setFixedWidth(120)
-        self._btn_format.clicked.connect(self._format_body)
-        body_bar.addWidget(self._btn_format)
-        body_bar.addStretch()
-        self._body_editor = BodyEditor()
-        bw.addLayout(body_bar)
-        bw.addWidget(self._body_editor, 1)
+        # Body tab: Form / JSON mode switch (see RequestBodyEditor).
+        self._body_area = RequestBodyEditor()
+        self._body_area.mode_changed.connect(self._on_body_mode_changed)
+        self._body_area.format_failed.connect(self._on_body_format_failed)
 
         self._tabs.addTab(self._params_table, "")
         self._tabs.addTab(self._headers_table, "")
         self._tabs.addTab(cookies_wrap, "")
-        self._tabs.addTab(body_wrap, "")
+        self._tabs.addTab(self._body_area, "")
         return self._tabs
 
     def _build_response_area(self) -> QWidget:
@@ -730,7 +840,7 @@ class RequestEditorPanel(QWidget):
         self._params_table.set_rows([])
         self._headers_table.set_rows([])
         self._cookies_table.set_rows([])
-        self._body_editor.clear()
+        self._body_area.clear()
         self._reset_response_pane()
         self._configure_response_tabs_for_flow(None)
 
@@ -859,7 +969,7 @@ class RequestEditorPanel(QWidget):
         self._act_cookie_captured.setText(tr("editor.cookie.captured"))
         self._act_cookie_chrome.setText(tr("editor.cookie.chrome"))
         self._act_cookie_safari.setText(tr("editor.cookie.safari"))
-        self._btn_format.setText(tr("editor.format_json"))
+        self._body_area.retranslate()
         self._tabs.setTabText(0, tr("editor.tab.params"))
         self._tabs.setTabText(1, tr("editor.tab.headers"))
         self._tabs.setTabText(2, tr("editor.tab.cookies"))
@@ -1313,8 +1423,8 @@ class RequestEditorPanel(QWidget):
         self._headers_table.set_rows(header_rows)
         self._cookies_table.set_rows(cookie_rows)
 
-        body_text = flow.get_request_body_text() if flow.request_body else ""
-        self._body_editor.setPlainText(body_text)
+        raw_body = flow.get_request_body_raw_text() if flow.request_body else ""
+        self._body_area.set_body(raw_body, flow.request_content_type)
         self._name_input.setText(self._default_name_for_editor(flow.url))
         self._sync_params_from_url()
         self._try_bind_saved_request_identity()
@@ -1334,7 +1444,7 @@ class RequestEditorPanel(QWidget):
         self._cookies_table.set_rows([
             (en, k, normalize_cookie_value(v)) for en, k, v in req.cookies
         ])
-        self._body_editor.setPlainText(_decode_body_text(req.body))
+        self._body_area.set_body(req.body, self._content_type_from_rows(req.headers))
         self._name_input.setText(req.name.strip() or self._default_name_for_editor(req.url))
         self._set_signer_id(req.signer_id)
         self._sync_params_from_url()
@@ -1505,9 +1615,38 @@ class RequestEditorPanel(QWidget):
     # Body
     # ------------------------------------------------------------------ #
 
-    def _format_body(self) -> None:
-        if not self._body_editor.format_json():
-            QMessageBox.information(self, tr("editor.format_json"), tr("editor.body.not_json"))
+    def _on_body_format_failed(self) -> None:
+        QMessageBox.information(self, tr("editor.format_json"), tr("editor.body.not_json"))
+
+    def _on_body_mode_changed(self, mode: str) -> None:
+        """Keep the Content-Type header in step when the user switches Body mode."""
+        current = self._content_type_from_rows(self._headers_table.rows())
+        if mode == RequestBodyEditor.MODE_FORM:
+            if "x-www-form-urlencoded" not in current.lower():
+                self._set_header_value("Content-Type", "application/x-www-form-urlencoded")
+        elif "x-www-form-urlencoded" in current.lower():
+            self._set_header_value("Content-Type", "application/json")
+
+    @staticmethod
+    def _content_type_from_rows(rows) -> str:
+        for _en, key, value in rows:
+            if key.lower() == "content-type":
+                return value
+        return ""
+
+    def _set_header_value(self, name: str, value: str) -> None:
+        low = name.lower()
+        new_rows = []
+        found = False
+        for en, key, val in self._headers_table.rows():
+            if key.lower() == low:
+                new_rows.append((True, key, value))
+                found = True
+            else:
+                new_rows.append((en, key, val))
+        if not found:
+            new_rows.append((True, name, value))
+        self._headers_table.set_rows(new_rows)
 
     # ------------------------------------------------------------------ #
     # Signers (auth.json profiles)
@@ -1599,7 +1738,11 @@ class RequestEditorPanel(QWidget):
 
         method = self._method_combo.currentText()
         headers, cookies = self._collect_send_headers()
-        body = self._body_editor.toPlainText().encode("utf-8")
+        if self._body_area.mode() == RequestBodyEditor.MODE_FORM and not any(
+            k.lower() == "content-type" for k in headers
+        ):
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        body = self._body_area.body_text().encode("utf-8")
 
         signed = self._apply_selected_signer(headers, body)
         if signed is None:
@@ -1680,7 +1823,7 @@ class RequestEditorPanel(QWidget):
             ),
             self._normalize_kv_rows(self._headers_table.rows()),
             self._normalize_kv_rows(self._cookies_table.rows(), normalize_values=True),
-            self._body_editor.toPlainText(),
+            self._body_area.body_text(),
         )
 
     @staticmethod
@@ -1758,7 +1901,7 @@ class RequestEditorPanel(QWidget):
             url=self._url_input.text().strip(),
             headers=self._headers_table.rows(),
             cookies=self._cookies_table.rows(),
-            body=self._body_editor.toPlainText(),
+            body=self._body_area.body_text(),
             last_response=last_response,
             signer_id=self._selected_signer_id(),
         )
