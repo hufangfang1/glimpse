@@ -387,6 +387,24 @@ QTableView::item:selected {
     color: #cdd6f4;
 }
 
+/* ── Grouped traffic tree (View ▸ Group by host) ─────────────────── */
+QTreeView {
+    background-color: #1e1e2e;
+    alternate-background-color: #181825;
+    border: none;
+    color: #cdd6f4;
+    selection-background-color: #313244;
+    selection-color: #cdd6f4;
+    outline: none;
+}
+QTreeView::item {
+    padding: 2px 0;
+}
+QTreeView::item:selected {
+    background-color: #363654;
+    color: #cdd6f4;
+}
+
 /* ── Request editor collections (right drawer + rail) ─────────────── */
 QWidget#editor_collections_drawer {
     background-color: #181825;
