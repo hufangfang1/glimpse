@@ -418,6 +418,26 @@ QToolButton#editor_collections_toggle:pressed,
 QToolButton#editor_collections_add:pressed {
     background-color: #585b70;
 }
+
+/* ── Capture-records column (left rail) ──────────────────────────── */
+QWidget#traffic_rail {
+    background-color: #11111b;
+    border-right: 1px solid #313244;
+}
+QToolButton#traffic_toggle {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+}
+QToolButton#traffic_toggle:hover {
+    background-color: #45475a;
+}
+QToolButton#traffic_toggle:pressed {
+    background-color: #585b70;
+}
 QTreeWidget#editor_collections {
     background-color: #181825;
     border: none;

@@ -92,7 +92,9 @@ class _ComboPopupNoScrollFilter(QObject):
             return True
         return super().eventFilter(obj, event)
 
-_COLLECTIONS_DRAWER_WIDTH = 240
+_COLLECTIONS_DRAWER_WIDTH = 240      # default width when the drawer is first opened
+_COLLECTIONS_DRAWER_MIN_WIDTH = 200  # user can't drag the drawer narrower than this
+_COLLECTIONS_DRAWER_MAX_WIDTH = 640  # ...nor wider
 _COLLECTIONS_RAIL_WIDTH = 32
 
 # Sent only when the user has not set them — mimics a normal browser navigation.
@@ -528,6 +530,11 @@ class RequestEditorPanel(QWidget):
         self._send_disabled = False
         self._saved_status_text = ""
         self._collections_drawer_open = False
+        # Width the drawer reopens at — updated whenever the user resizes it.
+        self._collections_drawer_width = _COLLECTIONS_DRAWER_WIDTH
+        # Remembered request/response divider sizes per orientation (① flippable split).
+        self._resp_sizes_v = [360, 320]   # stacked (request top, response bottom)
+        self._resp_sizes_h: Optional[list] = None  # side-by-side (lazily set on first flip)
         # Response currently shown in the pane (capture, send, or persisted reload).
         self._last_response_flow: Optional[FlowModel] = None
 
@@ -549,8 +556,6 @@ class RequestEditorPanel(QWidget):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-
         # ── Main: placeholder or editor + response ──
         self._placeholder = QLabel()
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -563,11 +568,11 @@ class RequestEditorPanel(QWidget):
         work_layout.addLayout(self._build_url_bar())
         work_layout.addLayout(self._build_save_bar())
 
-        editor_response = QSplitter(Qt.Orientation.Vertical)
-        editor_response.addWidget(self._build_request_tabs())
-        editor_response.addWidget(self._build_response_area())
-        editor_response.setSizes([360, 320])
-        work_layout.addWidget(editor_response, 1)
+        self._editor_response = QSplitter(Qt.Orientation.Vertical)
+        self._editor_response.addWidget(self._build_request_tabs())
+        self._editor_response.addWidget(self._build_response_area())
+        self._editor_response.setSizes(self._resp_sizes_v)
+        work_layout.addWidget(self._editor_response, 1)
 
         self._work_stack = QStackedWidget()
         self._work_stack.addWidget(self._placeholder)
@@ -629,23 +634,16 @@ class RequestEditorPanel(QWidget):
         rail_layout.addWidget(self._btn_rail_new_group)
         rail_layout.addStretch()
 
-        self._collections_wrap = QWidget()
-        wrap_layout = QHBoxLayout(self._collections_wrap)
-        wrap_layout.setContentsMargins(0, 0, 0, 0)
-        wrap_layout.setSpacing(0)
-        self._collections_drawer.setFixedWidth(_COLLECTIONS_DRAWER_WIDTH)
-        wrap_layout.addWidget(self._collections_drawer)
-        wrap_layout.addWidget(self._collections_rail)
+        # ③ Collections as a slide-over: the drawer floats over the work area on
+        # demand instead of occupying a permanent column. Only the rail stays docked.
+        self._collections_drawer.setParent(self)
+        self._collections_drawer.hide()
 
-        self._main_splitter.addWidget(self._work_stack)
-        self._main_splitter.addWidget(self._collections_wrap)
-        self._main_splitter.setStretchFactor(0, 1)
-        self._main_splitter.setStretchFactor(1, 0)
-        self._main_splitter.setChildrenCollapsible(False)
+        outer.addWidget(self._work_stack, 1)
+        outer.addWidget(self._collections_rail)
 
         QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self._toggle_collections_drawer)
 
-        outer.addWidget(self._main_splitter)
         self._set_collections_drawer_open(False)
 
     def _build_url_bar(self):
@@ -740,10 +738,16 @@ class RequestEditorPanel(QWidget):
         self._btn_save_as = QPushButton()
         self._btn_save_as.setFixedHeight(_EDITOR_CONTROL_HEIGHT)
         self._btn_save_as.clicked.connect(self._save_as)
+        # ① Flip the request/response split between stacked and side-by-side.
+        self._btn_flip_layout = QPushButton()
+        self._btn_flip_layout.setObjectName("editor_flip_layout")
+        self._btn_flip_layout.setFixedSize(40, _EDITOR_CONTROL_HEIGHT)
+        self._btn_flip_layout.clicked.connect(self._toggle_response_orientation)
         bar.addWidget(self._name_label)
         bar.addWidget(self._name_input, 1)
         bar.addWidget(self._btn_save)
         bar.addWidget(self._btn_save_as)
+        bar.addWidget(self._btn_flip_layout)
         return bar
 
     def _build_request_tabs(self) -> QTabWidget:
@@ -923,17 +927,28 @@ class RequestEditorPanel(QWidget):
 
     def _set_collections_drawer_open(self, open: bool) -> None:
         self._collections_drawer_open = open
-        self._collections_drawer.setVisible(open)
         if open:
             self._reload_signer_combo(self._selected_signer_id())
-        total = max(self._main_splitter.width(), 400)
-        rail = _COLLECTIONS_RAIL_WIDTH
-        if open:
-            drawer = _COLLECTIONS_DRAWER_WIDTH
-            self._main_splitter.setSizes([total - drawer - rail, drawer + rail])
+            self._position_drawer()
+            self._collections_drawer.show()
+            self._collections_drawer.raise_()
         else:
-            self._main_splitter.setSizes([total - rail, rail])
+            self._collections_drawer.hide()
         self._sync_collections_toggle_label()
+
+    def _position_drawer(self) -> None:
+        """Anchor the floating drawer to the right edge, just left of the rail."""
+        width = max(
+            _COLLECTIONS_DRAWER_MIN_WIDTH,
+            min(self._collections_drawer_width, _COLLECTIONS_DRAWER_MAX_WIDTH),
+        )
+        x = self.width() - _COLLECTIONS_RAIL_WIDTH - width
+        self._collections_drawer.setGeometry(x, 0, width, self.height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._collections_drawer_open:
+            self._position_drawer()
 
     def _sync_collections_toggle_label(self) -> None:
         if self._collections_drawer_open:
@@ -942,6 +957,31 @@ class RequestEditorPanel(QWidget):
         else:
             self._btn_collections_toggle.setText("‹")
             self._btn_collections_toggle.setToolTip(tr("editor.collections.show"))
+
+    def _toggle_response_orientation(self) -> None:
+        sp = self._editor_response
+        if sp.orientation() == Qt.Orientation.Vertical:
+            self._resp_sizes_v = sp.sizes()
+            sp.setOrientation(Qt.Orientation.Horizontal)
+            if self._resp_sizes_h:
+                sp.setSizes(self._resp_sizes_h)
+            else:
+                half = max(sp.width(), 400) // 2
+                sp.setSizes([half, half])
+        else:
+            self._resp_sizes_h = sp.sizes()
+            sp.setOrientation(Qt.Orientation.Vertical)
+            sp.setSizes(self._resp_sizes_v)
+        self._sync_flip_button()
+
+    def _sync_flip_button(self) -> None:
+        # The glyph shows the layout a click switches TO.
+        if self._editor_response.orientation() == Qt.Orientation.Vertical:
+            self._btn_flip_layout.setText("⇄")
+            self._btn_flip_layout.setToolTip(tr("editor.layout.side_by_side"))
+        else:
+            self._btn_flip_layout.setText("⇅")
+            self._btn_flip_layout.setToolTip(tr("editor.layout.stacked"))
 
     # ------------------------------------------------------------------ #
     # i18n
@@ -965,6 +1005,7 @@ class RequestEditorPanel(QWidget):
         self._btn_save.setToolTip(tr("editor.save.tooltip"))
         self._btn_save_as.setText(tr("editor.save_as"))
         self._btn_save_as.setToolTip(tr("editor.save_as.tooltip"))
+        self._sync_flip_button()
         self._btn_sync_cookie.setText(tr("editor.sync_cookie"))
         self._act_cookie_captured.setText(tr("editor.cookie.captured"))
         self._act_cookie_chrome.setText(tr("editor.cookie.chrome"))

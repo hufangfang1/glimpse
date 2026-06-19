@@ -11,6 +11,7 @@ from typing import Dict, Optional
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -20,6 +21,8 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QToolBar,
+    QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -36,6 +39,8 @@ from gui.widgets.scope_dialog import ScopeDialog
 from gui.widgets.request_editor import RequestEditorPanel
 
 MAX_CAPTURED_FLOWS = 2000
+TRAFFIC_RAIL_WIDTH = 32          # collapsed width of the capture-records column
+TRAFFIC_PANEL_WIDTH = 488        # default expanded width of the table (520 - rail)
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +58,9 @@ class MainWindow(QMainWindow):
         # Track current proxy state so retranslate can refresh the status label
         # without flipping it back to "Stopped" mid-run.
         self._proxy_state: str = "stopped"   # "stopped" | "running" | "stopping"
+        # Collapse state for the left capture-records column (mirrors the editor drawer).
+        self._traffic_collapsed = False
+        self._traffic_width = TRAFFIC_PANEL_WIDTH
 
         self._build_ui()
         self._build_menu()
@@ -151,8 +159,6 @@ class MainWindow(QMainWindow):
         ):
             w.setFixedHeight(CONTROL_HEIGHT)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
         self._traffic_table = TrafficTable()
         self._traffic_table.flow_selected.connect(self._on_flow_selected)
         self._traffic_table.replay_requested.connect(self._replay_flow)
@@ -160,18 +166,40 @@ class MainWindow(QMainWindow):
         self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
         self._traffic_table.scope_add_requested.connect(self._add_to_scope)
 
+        # Left rail holding the collapse/expand toggle (mirrors the editor drawer rail).
+        self._traffic_rail = QWidget()
+        self._traffic_rail.setObjectName("traffic_rail")
+        self._traffic_rail.setFixedWidth(TRAFFIC_RAIL_WIDTH)
+        traffic_rail_layout = QVBoxLayout(self._traffic_rail)
+        traffic_rail_layout.setContentsMargins(4, 8, 4, 8)
+        traffic_rail_layout.setSpacing(8)
+        self._btn_traffic_toggle = QToolButton()
+        self._btn_traffic_toggle.setObjectName("traffic_toggle")
+        self._btn_traffic_toggle.setFixedSize(24, 24)
+        self._btn_traffic_toggle.clicked.connect(self._toggle_traffic_panel)
+        traffic_rail_layout.addWidget(self._btn_traffic_toggle)
+        traffic_rail_layout.addStretch()
+
+        self._traffic_wrap = QWidget()
+        traffic_wrap_layout = QHBoxLayout(self._traffic_wrap)
+        traffic_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        traffic_wrap_layout.setSpacing(0)
+        traffic_wrap_layout.addWidget(self._traffic_rail)
+        traffic_wrap_layout.addWidget(self._traffic_table, 1)
+
         self._editor_panel = RequestEditorPanel(
             store=self._collections,
             cookie_jar=self._cookie_jar,
             parent=self,
         )
 
-        splitter.addWidget(self._traffic_table)
-        splitter.addWidget(self._editor_panel)
-        splitter.setSizes([520, 760])
-        splitter.setChildrenCollapsible(False)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self._traffic_wrap)
+        self._splitter.addWidget(self._editor_panel)
+        self._splitter.setSizes([520, 760])
+        self._splitter.setChildrenCollapsible(False)
 
-        self.setCentralWidget(splitter)
+        self.setCentralWidget(self._splitter)
 
         self._sb_status = QLabel()
         self._sb_status.setStyleSheet("color: #f38ba8;")
@@ -189,6 +217,36 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._sb_addr)
 
         self._update_scope_status()
+
+    # ------------------------------------------------------------------ #
+    # Capture-records column collapse/expand (mirrors the editor drawer)
+    # ------------------------------------------------------------------ #
+
+    def _toggle_traffic_panel(self) -> None:
+        self._set_traffic_collapsed(not self._traffic_collapsed)
+
+    def _set_traffic_collapsed(self, collapsed: bool) -> None:
+        # Remember the width the user dragged to, so expanding restores it.
+        if not self._traffic_collapsed and collapsed and self._traffic_table.width() > 0:
+            self._traffic_width = self._traffic_table.width()
+        self._traffic_collapsed = collapsed
+        self._traffic_table.setVisible(not collapsed)
+        total = max(self._splitter.width(), 400)
+        rail = TRAFFIC_RAIL_WIDTH
+        if collapsed:
+            self._splitter.setSizes([rail, total - rail])
+        else:
+            width = self._traffic_width + rail
+            self._splitter.setSizes([width, total - width])
+        self._sync_traffic_toggle_label()
+
+    def _sync_traffic_toggle_label(self) -> None:
+        if self._traffic_collapsed:
+            self._btn_traffic_toggle.setText("›")
+            self._btn_traffic_toggle.setToolTip(tr("toolbar.traffic.show"))
+        else:
+            self._btn_traffic_toggle.setText("‹")
+            self._btn_traffic_toggle.setToolTip(tr("toolbar.traffic.hide"))
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -282,6 +340,7 @@ class MainWindow(QMainWindow):
         self._btn_scope.setToolTip(tr("toolbar.scope.tooltip"))
         self._btn_cert.setText(tr("toolbar.cert"))
         self._btn_cert.setToolTip(tr("toolbar.cert.tooltip"))
+        self._sync_traffic_toggle_label()
 
         # Menus
         self._file_menu.setTitle(tr("menu.file"))
