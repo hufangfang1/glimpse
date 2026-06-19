@@ -177,6 +177,8 @@ _EN: Dict[str, str] = {
     "col.size": "Size",
     "col.duration": "Duration",
     "col.time": "Time",
+    "col.menu.title": "Columns",
+    "col.menu.reset": "Reset columns",
 
     # Traffic table — context menu
     "ctx.copy_url": "Copy URL",
@@ -418,6 +420,8 @@ _ZH: Dict[str, str] = {
     "col.size": "大小",
     "col.duration": "耗时",
     "col.time": "时间",
+    "col.menu.title": "显示列",
+    "col.menu.reset": "重置列",
 
     # Traffic table — context menu
     "ctx.copy_url": "复制 URL",

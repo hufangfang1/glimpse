@@ -40,6 +40,8 @@ COLUMN_KEYS = [
     "col.time",
 ]
 
+DEFAULT_COL_WIDTHS = [44, 160, 240, 72, 58, 120, 72, 78, 96]
+
 # Custom role used by the proxy model when sorting — lets us return typed
 # values (ints / floats / datetimes) instead of the displayed strings.
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -249,16 +251,17 @@ class TrafficTable(QWidget):
         self._view.doubleClicked.connect(self._on_double_clicked)
 
         hh = self._view.horizontalHeader()
-        hh.setSectionsMovable(False)
+        hh.setSectionsMovable(True)   # drag column headers to reorder
         hh.setStretchLastSection(False)
         hh.setCascadingSectionResizes(False)
         hh.setMinimumSectionSize(48)
         hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         hh.setSortIndicatorShown(True)
         hh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._on_header_menu)
 
-        col_widths = [44, 160, 240, 72, 58, 120, 72, 78, 96]
-        for col, width in enumerate(col_widths):
+        for col, width in enumerate(DEFAULT_COL_WIDTHS):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             hh.resizeSection(col, width)
 
@@ -339,6 +342,49 @@ class TrafficTable(QWidget):
         flow = self._flow_at_proxy_row(index.row())
         if flow:
             self.replay_requested.emit(flow)
+
+    def _on_header_menu(self, pos) -> None:
+        """Right-click the header to show/hide columns; drag headers to reorder."""
+        hh = self._view.horizontalHeader()
+        menu = QMenu(self)
+        menu.setSeparatorsCollapsible(False)
+
+        title = QAction(tr("col.menu.title"), menu)
+        title.setEnabled(False)
+        f = title.font()
+        f.setItalic(True)
+        f.setPointSize(max(f.pointSize() - 1, 10))
+        title.setFont(f)
+        menu.addAction(title)
+        menu.addSeparator()
+
+        visible = sum(1 for c in range(hh.count()) if not hh.isSectionHidden(c))
+        for col in range(hh.count()):
+            act = QAction(tr(COLUMN_KEYS[col]), menu)
+            act.setCheckable(True)
+            shown = not hh.isSectionHidden(col)
+            act.setChecked(shown)
+            if shown and visible <= 1:
+                act.setEnabled(False)   # never hide the last visible column
+            act.toggled.connect(lambda checked, c=col: hh.setSectionHidden(c, not checked))
+            menu.addAction(act)
+
+        menu.addSeparator()
+        reset = QAction(tr("col.menu.reset"), menu)
+        reset.triggered.connect(self._reset_columns)
+        menu.addAction(reset)
+        menu.exec(hh.mapToGlobal(pos))
+
+    def _reset_columns(self) -> None:
+        """Restore default column order, visibility and widths."""
+        hh = self._view.horizontalHeader()
+        for logical in range(hh.count()):
+            vis = hh.visualIndex(logical)
+            if vis != logical:
+                hh.moveSection(vis, logical)
+        for col, width in enumerate(DEFAULT_COL_WIDTHS):
+            hh.setSectionHidden(col, False)
+            hh.resizeSection(col, width)
 
     def _on_context_menu(self, pos) -> None:
         index = self._view.indexAt(pos)
