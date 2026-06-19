@@ -321,6 +321,13 @@ class MainWindow(QMainWindow):
         self._act_scope.triggered.connect(self._edit_scope)
         self._edit_menu.addAction(self._act_scope)
 
+        # View menu — display options (more added in later phases).
+        self._view_menu = menu.addMenu("")
+        self._act_compact = QAction(self)
+        self._act_compact.setCheckable(True)
+        self._act_compact.toggled.connect(self._traffic_table.set_compact)
+        self._view_menu.addAction(self._act_compact)
+
         # Language menu — checkable radio group.
         self._language_menu = menu.addMenu("")
         self._language_group = QActionGroup(self)
@@ -386,6 +393,9 @@ class MainWindow(QMainWindow):
         self._act_copy_url.setText(tr("menu.edit.copy_url"))
         self._act_copy_curl.setText(tr("menu.edit.copy_curl"))
         self._act_scope.setText(tr("menu.edit.scope"))
+
+        self._view_menu.setTitle(tr("menu.view"))
+        self._act_compact.setText(tr("menu.view.compact"))
 
         self._language_menu.setTitle(tr("menu.language"))
         for code, action in self._language_actions.items():

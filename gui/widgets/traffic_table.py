@@ -470,6 +470,13 @@ class TrafficTable(QWidget):
     def muted_hosts(self) -> set:
         return self._proxy.muted_hosts()
 
+    def set_compact(self, compact: bool) -> None:
+        """Toggle compact row height for scanning lots of traffic at once."""
+        vh = self._view.verticalHeader()
+        if not hasattr(self, "_default_row_h"):
+            self._default_row_h = vh.defaultSectionSize()
+        vh.setDefaultSectionSize(22 if compact else self._default_row_h)
+
     def pop_oldest(self, count: int) -> List[FlowModel]:
         return self._model.pop_oldest(count)
 
