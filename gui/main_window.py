@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -110,6 +111,25 @@ class MainWindow(QMainWindow):
         self._filter_input.setFixedWidth(220)
         self._filter_input.textChanged.connect(self._on_filter_changed)
 
+        # Quick-filter presets (one-click common queries).
+        self._btn_filter_presets = QToolButton()
+        self._btn_filter_presets.setText("▾")
+        self._btn_filter_presets.setFixedHeight(CONTROL_HEIGHT)
+        self._btn_filter_presets.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self._filter_menu = QMenu(self)
+        self._act_filter_errors = self._filter_menu.addAction(
+            "", lambda: self._filter_input.setText("status:>=400"))
+        self._act_filter_slow = self._filter_menu.addAction(
+            "", lambda: self._filter_input.setText("slow:>500ms"))
+        self._act_filter_post = self._filter_menu.addAction(
+            "", lambda: self._filter_input.setText("method:POST"))
+        self._filter_menu.addSeparator()
+        self._act_filter_clear = self._filter_menu.addAction(
+            "", self._filter_input.clear)
+        self._btn_filter_presets.setMenu(self._filter_menu)
+
         self._btn_replay = QPushButton()
         self._btn_replay.setFixedWidth(96)
         self._btn_replay.setEnabled(False)
@@ -139,6 +159,7 @@ class MainWindow(QMainWindow):
         self._toolbar.addSeparator()
         self._toolbar.addWidget(self._filter_label)
         self._toolbar.addWidget(self._filter_input)
+        self._toolbar.addWidget(self._btn_filter_presets)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -332,6 +353,12 @@ class MainWindow(QMainWindow):
         self._btn_clear.setText(tr("toolbar.clear"))
         self._filter_label.setText(tr("toolbar.filter"))
         self._filter_input.setPlaceholderText(tr("toolbar.filter.placeholder"))
+        self._filter_input.setToolTip(tr("toolbar.filter.tooltip"))
+        self._btn_filter_presets.setToolTip(tr("toolbar.filter.presets"))
+        self._act_filter_errors.setText(tr("filter.preset.errors"))
+        self._act_filter_slow.setText(tr("filter.preset.slow"))
+        self._act_filter_post.setText(tr("filter.preset.post"))
+        self._act_filter_clear.setText(tr("filter.preset.clear"))
         self._btn_replay.setText(tr("toolbar.replay"))
         self._btn_replay.setToolTip(tr("toolbar.replay.tooltip"))
         self._btn_collections.setText(tr("toolbar.collections"))
@@ -556,6 +583,7 @@ class MainWindow(QMainWindow):
 
     def _on_filter_changed(self, text: str) -> None:
         self._traffic_table.set_filter(text)
+        self._update_count()
 
     def _on_flow_selected(self, flow: Optional[FlowModel]) -> None:
         self._selected_flow_id = flow.id if flow else None
@@ -657,11 +685,14 @@ class MainWindow(QMainWindow):
         )
 
     def _update_count(self) -> None:
-        n = self._traffic_table.count()
-        if n == 1:
+        total = self._traffic_table.count()
+        shown = self._traffic_table.visible_count()
+        if shown < total:
+            self._sb_count.setText(tr("status.requests.filtered", shown=shown, total=total))
+        elif total == 1:
             self._sb_count.setText(tr("status.requests.one"))
         else:
-            self._sb_count.setText(tr("status.requests", n=n))
+            self._sb_count.setText(tr("status.requests", n=total))
 
     # ------------------------------------------------------------------ #
     # Request replay

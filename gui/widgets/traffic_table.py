@@ -3,6 +3,8 @@ Traffic table — displays captured HTTP flows.
 """
 from __future__ import annotations
 
+import fnmatch
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -45,6 +47,89 @@ DEFAULT_COL_WIDTHS = [44, 160, 240, 72, 58, 120, 72, 78, 96]
 # Custom role used by the proxy model when sorting — lets us return typed
 # values (ints / floats / datetimes) instead of the displayed strings.
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def _match_status(code: Optional[int], val: str) -> bool:
+    if code is None:
+        return False
+    val = val.lower()
+    if len(val) == 3 and val[1:] == "xx" and val[0].isdigit():
+        return str(code)[0] == val[0]                 # 5xx / 4xx class
+    m = re.match(r"(>=|<=|>|<)(\d+)$", val)
+    if m:
+        op, num = m.group(1), int(m.group(2))
+        return {">": code > num, ">=": code >= num,
+                "<": code < num, "<=": code <= num}[op]
+    return val.isdigit() and code == int(val)         # exact
+
+
+def _match_duration(dur: float, val: str) -> bool:
+    m = re.match(r"(>=|<=|>|<)?\s*([\d.]+)\s*(ms|s)?$", val.lower())
+    if not m:
+        return False
+    op = m.group(1) or ">"
+    threshold = float(m.group(2)) / (1000 if (m.group(3) or "ms") == "ms" else 1)
+    return {">": dur > threshold, ">=": dur >= threshold,
+            "<": dur < threshold, "<=": dur <= threshold}[op]
+
+
+def _match_glob(value: str, pat: str) -> bool:
+    value, pat = value.lower(), pat.lower()
+    if "*" in pat or "?" in pat:
+        return fnmatch.fnmatch(value, pat)
+    return pat in value                               # plain substring
+
+
+def _token_matches(flow: FlowModel, tok: str) -> bool:
+    if ":" in tok:
+        key, _, val = tok.partition(":")
+        key, val = key.lower(), val.strip()
+        if not val:
+            return True
+        if key == "status":
+            return _match_status(flow.status_code, val)
+        if key == "host":
+            return _match_glob(flow.host or "", val)
+        if key == "path":
+            return _match_glob(flow.path or "", val)
+        if key == "method":
+            return (flow.method or "").lower() == val.lower()
+        if key == "slow":
+            return _match_duration(flow.duration, val)
+        # unknown key → fall through to free-text matching of the whole token
+    t = tok.lower()
+    return (t in (flow.host or "").lower()
+            or t in (flow.path or "").lower()
+            or t in (flow.method or "").lower())
+
+
+def flow_matches_query(flow: FlowModel, query: str) -> bool:
+    """Structured filter: space-separated predicates, ANDed together.
+
+    Examples: ``status:500``  ``status:5xx``  ``host:u.api.*``  ``method:POST``
+    ``slow:>500ms``  ``status:>=400 host:*orangevip*``  or plain substrings.
+    """
+    return all(_token_matches(flow, tok) for tok in query.split())
+
+
+class TrafficFilterProxy(QSortFilterProxyModel):
+    """Filter proxy that understands the structured query language above."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._query = ""
+
+    def set_query(self, text: str) -> None:
+        self._query = text or ""
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        if not self._query.strip():
+            return True
+        model = self.sourceModel()
+        flow = model.data(model.index(source_row, 0, source_parent),
+                          Qt.ItemDataRole.UserRole)
+        return flow is None or flow_matches_query(flow, self._query)
 
 
 class TrafficModel(QAbstractTableModel):
@@ -226,10 +311,8 @@ class TrafficTable(QWidget):
         super().__init__(parent)
 
         self._model = TrafficModel()
-        self._proxy = QSortFilterProxyModel()
+        self._proxy = TrafficFilterProxy()
         self._proxy.setSourceModel(self._model)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(-1)          # search all columns
         self._proxy.setSortRole(SORT_ROLE)
         self._proxy.setDynamicSortFilter(True)
 
@@ -304,10 +387,14 @@ class TrafficTable(QWidget):
         self.flow_selected.emit(None)
 
     def set_filter(self, text: str) -> None:
-        self._proxy.setFilterFixedString(text)
+        self._proxy.set_query(text)
 
     def count(self) -> int:
         return self._model.rowCount()
+
+    def visible_count(self) -> int:
+        """Rows currently passing the filter (≤ count())."""
+        return self._proxy.rowCount()
 
     def pop_oldest(self, count: int) -> List[FlowModel]:
         return self._model.pop_oldest(count)
