@@ -44,6 +44,14 @@ COLUMN_KEYS = [
 
 DEFAULT_COL_WIDTHS = [44, 160, 240, 72, 58, 120, 72, 78, 96]
 
+# Row tag colours (name, swatch emoji, dark-tint hex applied as row background).
+TAG_COLORS = [
+    ("red", "🔴", "#3a2730"),
+    ("yellow", "🟡", "#3a3727"),
+    ("green", "🟢", "#273a2c"),
+    ("blue", "🔵", "#27313a"),
+]
+
 # Custom role used by the proxy model when sorting — lets us return typed
 # values (ints / floats / datetimes) instead of the displayed strings.
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -96,6 +104,15 @@ def _token_matches(flow: FlowModel, tok: str) -> bool:
             return (flow.method or "").lower() == val.lower()
         if key == "slow":
             return _match_duration(flow.duration, val)
+        if key == "is":
+            v = val.lower()
+            if v == "flagged":
+                return bool(flow.flagged)
+            if v == "tagged":
+                return bool(flow.tag_color)
+            if v == "noted":
+                return bool(flow.note)
+            return False
         # unknown key → fall through to free-text matching of the whole token
     t = tok.lower()
     return (t in (flow.host or "").lower()
@@ -179,6 +196,12 @@ class TrafficModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             return self._foreground(flow, col)
 
+        if role == Qt.ItemDataRole.BackgroundRole and flow.tag_color:
+            return QColor(flow.tag_color)
+
+        if role == Qt.ItemDataRole.ToolTipRole and flow.note:
+            return flow.note
+
         if role == Qt.ItemDataRole.FontRole:
             if col in (3, 4):   # Method / Status — slightly bold
                 f = QFont()
@@ -200,7 +223,7 @@ class TrafficModel(QAbstractTableModel):
     # ------------------------------------------------------------------ #
 
     def _display(self, f: FlowModel, row: int, col: int) -> str:
-        if col == 0: return str(self._seqs[row])
+        if col == 0: return ("★ " if f.flagged else "") + str(self._seqs[row])
         if col == 1: return f.host
         if col == 2: return f.path or "/"
         if col == 3: return f.method
@@ -259,6 +282,15 @@ class TrafficModel(QAbstractTableModel):
                 self.dataChanged.emit(top_left, bottom_right)
                 return
         self.append_flow(flow)
+
+    def mark_flow_changed(self, flow: FlowModel) -> None:
+        """Repaint a row after its annotations (flag / note / colour) change."""
+        for i, f in enumerate(self._flows):
+            if f is flow:
+                tl = self.index(i, 0)
+                br = self.index(i, len(COLUMN_KEYS) - 1)
+                self.dataChanged.emit(tl, br)
+                return
 
     def clear(self) -> None:
         self.beginResetModel()
@@ -518,6 +550,23 @@ class TrafficTable(QWidget):
         self._add_menu_action(menu, "↩", tr("ctx.replay"),
                               lambda: self.replay_requested.emit(flow))
 
+        # ── Annotate group (flag / colour / note) ──
+        menu.addSeparator()
+        flag_icon = "★" if flow.flagged else "☆"
+        flag_label = tr("ctx.unflag") if flow.flagged else tr("ctx.flag")
+        self._add_menu_action(menu, flag_icon, flag_label,
+                              lambda: self._toggle_flag(flow))
+        color_menu = menu.addMenu(self._submenu_title("🎨", tr("ctx.color")))
+        for name, emoji, hexv in TAG_COLORS:
+            self._add_menu_action(color_menu, emoji, tr("ctx.tag." + name),
+                                  lambda h=hexv: self._set_tag_color(flow, h))
+        color_menu.addSeparator()
+        self._add_menu_action(color_menu, "⚪", tr("ctx.tag.clear"),
+                              lambda: self._set_tag_color(flow, ""))
+        note_label = tr("ctx.note.edit") if flow.note else tr("ctx.note.add")
+        self._add_menu_action(menu, "📝", note_label,
+                              lambda: self._edit_note(flow))
+
         # ── Scope / filter group ──
         if flow.host:
             menu.addSeparator()
@@ -565,6 +614,23 @@ class TrafficTable(QWidget):
         action.triggered.connect(callback)
         menu.addAction(action)
         return action
+
+    def _toggle_flag(self, flow: FlowModel) -> None:
+        flow.flagged = not flow.flagged
+        self._model.mark_flow_changed(flow)
+
+    def _set_tag_color(self, flow: FlowModel, hex_color: str) -> None:
+        flow.tag_color = hex_color
+        self._model.mark_flow_changed(flow)
+
+    def _edit_note(self, flow: FlowModel) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(
+            self, tr("ctx.note.title"), tr("ctx.note.prompt"), text=flow.note
+        )
+        if ok:
+            flow.note = text.strip()
+            self._model.mark_flow_changed(flow)
 
     @staticmethod
     def _format_menu_header(flow: FlowModel) -> str:

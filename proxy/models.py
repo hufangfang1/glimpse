@@ -147,6 +147,11 @@ class FlowModel:
     error: Optional[str] = None
     ws_messages: List[WSMessage] = field(default_factory=list)
 
+    # User annotations in the traffic list (session-only; not persisted).
+    flagged: bool = False
+    note: str = ""
+    tag_color: str = ""
+
     # ------------------------------------------------------------------ #
     # Computed properties
     # ------------------------------------------------------------------ #
