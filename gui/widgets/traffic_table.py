@@ -30,10 +30,10 @@ from gui.themes import METHOD_COLORS, status_color
 # Column ids — used both as canonical identifiers and i18n keys.
 COLUMN_KEYS = [
     "col.seq",
-    "col.method",
-    "col.status",
     "col.host",
     "col.path",
+    "col.method",
+    "col.status",
     "col.type",
     "col.size",
     "col.duration",
@@ -93,13 +93,13 @@ class TrafficModel(QAbstractTableModel):
             return self._foreground(flow, col)
 
         if role == Qt.ItemDataRole.FontRole:
-            if col in (1, 2):   # Method / Status — slightly bold
+            if col in (3, 4):   # Method / Status — slightly bold
                 f = QFont()
                 f.setWeight(QFont.Weight.Medium)
                 return f
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if col in (0, 2, 6, 7, 8):
+            if col in (0, 4, 6, 7, 8):
                 return Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
@@ -114,13 +114,13 @@ class TrafficModel(QAbstractTableModel):
 
     def _display(self, f: FlowModel, row: int, col: int) -> str:
         if col == 0: return str(self._seqs[row])
-        if col == 1: return f.method
-        if col == 2:
+        if col == 1: return f.host
+        if col == 2: return f.path or "/"
+        if col == 3: return f.method
+        if col == 4:
             if f.status_code:
                 return str(f.status_code)
             return "ERR" if f.error else "-"
-        if col == 3: return f.host
-        if col == 4: return f.path or "/"
         if col == 5: return f.display_type() or "-"
         if col == 6: return f.format_size()
         if col == 7: return f.format_duration()
@@ -130,12 +130,12 @@ class TrafficModel(QAbstractTableModel):
     def _sort_key(self, f: FlowModel, row: int, col: int):
         # Return typed values so sorting works numerically/chronologically.
         if col == 0: return self._seqs[row]
-        if col == 1: return f.method
-        if col == 2:
+        if col == 1: return f.host
+        if col == 2: return f.path or "/"
+        if col == 3: return f.method
+        if col == 4:
             # Errors and missing statuses sort to the bottom in ascending order.
             return f.status_code if f.status_code is not None else 10_000
-        if col == 3: return f.host
-        if col == 4: return f.path or "/"
         if col == 5: return f.display_type() or ""
         if col == 6: return f.response_size
         if col == 7: return f.duration
@@ -143,10 +143,10 @@ class TrafficModel(QAbstractTableModel):
         return ""
 
     def _foreground(self, f: FlowModel, col: int) -> Optional[QColor]:
-        if col == 1:
+        if col == 3:
             colors = METHOD_COLORS.get(f.method, ("#cdd6f4", "#2a2a3e"))
             return QColor(colors[0])
-        if col == 2:
+        if col == 4:
             return QColor(status_color(f.status_code))
         return None
 
@@ -257,7 +257,7 @@ class TrafficTable(QWidget):
         hh.setSortIndicatorShown(True)
         hh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
 
-        col_widths = [44, 72, 58, 160, 240, 120, 72, 78, 96]
+        col_widths = [44, 160, 240, 72, 58, 120, 72, 78, 96]
         for col, width in enumerate(col_widths):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             hh.resizeSection(col, width)
