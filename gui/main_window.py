@@ -186,6 +186,7 @@ class MainWindow(QMainWindow):
         self._traffic_table.delete_requested.connect(self._delete_flow)
         self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
         self._traffic_table.scope_add_requested.connect(self._add_to_scope)
+        self._traffic_table.muted_changed.connect(self._on_muted_changed)
 
         # Left rail holding the collapse/expand toggle (mirrors the editor drawer rail).
         self._traffic_rail = QWidget()
@@ -227,6 +228,8 @@ class MainWindow(QMainWindow):
         self._sb_count = QLabel()
         self._sb_scope = QLabel("")
         self._sb_scope.setStyleSheet("color: #f9e2af;")
+        self._sb_muted = QLabel("")
+        self._sb_muted.setStyleSheet("color: #6c7086;")
         self._sb_addr = QLabel("")
 
         sb = self.statusBar()
@@ -235,6 +238,8 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._sb_count)
         sb.addWidget(QLabel("   "))
         sb.addWidget(self._sb_scope)
+        sb.addWidget(QLabel("   "))
+        sb.addWidget(self._sb_muted)
         sb.addPermanentWidget(self._sb_addr)
 
         self._update_scope_status()
@@ -665,6 +670,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("status.scope_added", kind=kind, pattern=pattern), 5000
         )
+
+    def _on_muted_changed(self) -> None:
+        self._update_count()
+        self._update_muted_status()
+
+    def _update_muted_status(self) -> None:
+        n = len(self._traffic_table.muted_hosts())
+        self._sb_muted.setText(tr("status.muted", n=n) if n else "")
 
     def _update_scope_status(self) -> None:
         allow, block = self._server.scope.snapshot()

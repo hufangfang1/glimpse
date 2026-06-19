@@ -130,23 +130,46 @@ def flow_matches_query(flow: FlowModel, query: str) -> bool:
 
 
 class TrafficFilterProxy(QSortFilterProxyModel):
-    """Filter proxy that understands the structured query language above."""
+    """Filter proxy: structured query language above, plus muted hosts."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._query = ""
+        self._muted: set[str] = set()
 
     def set_query(self, text: str) -> None:
         self._query = text or ""
         self.invalidateFilter()
 
+    def mute(self, host: str) -> None:
+        if host:
+            self._muted.add(host.lower())
+            self.invalidateFilter()
+
+    def unmute(self, host: str) -> None:
+        self._muted.discard((host or "").lower())
+        self.invalidateFilter()
+
+    def clear_muted(self) -> None:
+        if self._muted:
+            self._muted.clear()
+            self.invalidateFilter()
+
+    def is_muted(self, host: str) -> bool:
+        return (host or "").lower() in self._muted
+
+    def muted_hosts(self) -> set:
+        return set(self._muted)
+
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
-        if not self._query.strip():
-            return True
         model = self.sourceModel()
         flow = model.data(model.index(source_row, 0, source_parent),
                           Qt.ItemDataRole.UserRole)
-        return flow is None or flow_matches_query(flow, self._query)
+        if flow is None:
+            return True
+        if flow.host and flow.host.lower() in self._muted:
+            return False
+        return not self._query.strip() or flow_matches_query(flow, self._query)
 
 
 class TrafficModel(QAbstractTableModel):
@@ -338,6 +361,7 @@ class TrafficTable(QWidget):
     delete_requested = pyqtSignal(object)   # emits FlowModel
     filter_host_requested = pyqtSignal(str) # emits host string
     scope_add_requested = pyqtSignal(str, str)  # (action, pattern) — action: "allow"|"block"
+    muted_changed = pyqtSignal()            # muted-host set changed (refresh counts/status)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -427,6 +451,24 @@ class TrafficTable(QWidget):
     def visible_count(self) -> int:
         """Rows currently passing the filter (≤ count())."""
         return self._proxy.rowCount()
+
+    def mute_host(self, host: str) -> None:
+        self._proxy.mute(host)
+        self.muted_changed.emit()
+
+    def unmute_host(self, host: str) -> None:
+        self._proxy.unmute(host)
+        self.muted_changed.emit()
+
+    def clear_muted(self) -> None:
+        self._proxy.clear_muted()
+        self.muted_changed.emit()
+
+    def is_host_muted(self, host: str) -> bool:
+        return self._proxy.is_muted(host)
+
+    def muted_hosts(self) -> set:
+        return self._proxy.muted_hosts()
 
     def pop_oldest(self, count: int) -> List[FlowModel]:
         return self._model.pop_oldest(count)
@@ -575,12 +617,24 @@ class TrafficTable(QWidget):
                 tr("ctx.filter_host", host=flow.host),
                 lambda: self.filter_host_requested.emit(flow.host),
             )
+            if self.is_host_muted(flow.host):
+                self._add_menu_action(menu, "🔊", tr("ctx.unmute", host=flow.host),
+                                      lambda: self.unmute_host(flow.host))
+            else:
+                self._add_menu_action(menu, "🔇", tr("ctx.mute", host=flow.host),
+                                      lambda: self.mute_host(flow.host))
 
             allow_menu = menu.addMenu(self._submenu_title("✅", tr("ctx.add_allow")))
             self._populate_scope_menu(allow_menu, "allow", flow.host)
 
             block_menu = menu.addMenu(self._submenu_title("🚫", tr("ctx.add_block")))
             self._populate_scope_menu(block_menu, "block", flow.host)
+
+        if self.muted_hosts():
+            self._add_menu_action(
+                menu, "🔊", tr("ctx.unmute_all", n=len(self.muted_hosts())),
+                self.clear_muted,
+            )
 
         menu.addSeparator()
 
