@@ -363,6 +363,7 @@ class TrafficTable(QWidget):
     """Traffic table widget with built-in filter proxy."""
 
     flow_selected = pyqtSignal(object)      # emits FlowModel | None
+    inspect_requested = pyqtSignal(object)  # emits FlowModel (open standalone window)
     replay_requested = pyqtSignal(object)   # emits FlowModel
     delete_requested = pyqtSignal(object)   # emits FlowModel
     filter_host_requested = pyqtSignal(str) # emits host string
@@ -555,7 +556,7 @@ class TrafficTable(QWidget):
     def _on_double_clicked(self, index) -> None:
         flow = self._flow_at_proxy_row(index.row())
         if flow:
-            self.replay_requested.emit(flow)
+            self.inspect_requested.emit(flow)
 
     def _on_header_menu(self, pos) -> None:
         """Right-click the header to show/hide columns; drag headers to reorder."""
@@ -641,7 +642,9 @@ class TrafficTable(QWidget):
 
         menu.addSeparator()
 
-        # ── Replay ──
+        # ── Open in standalone window / Replay ──
+        self._add_menu_action(menu, "⧉", tr("traffic.menu.open_inspector"),
+                              lambda: self.inspect_requested.emit(flow))
         self._add_menu_action(menu, "↩", tr("ctx.replay"),
                               lambda: self.replay_requested.emit(flow))
 
@@ -774,7 +777,7 @@ class TrafficTable(QWidget):
     def _on_tree_double_clicked(self, idx) -> None:
         flow = idx.data(Qt.ItemDataRole.UserRole)
         if flow is not None:
-            self.replay_requested.emit(flow)
+            self.inspect_requested.emit(flow)
 
     def _on_tree_context_menu(self, pos) -> None:
         idx = self._tree.indexAt(pos)

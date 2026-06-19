@@ -14,6 +14,8 @@ from queue import Queue
 from gui.i18n import tr
 
 from .addon import GlimpseAddon
+from .breakpoints import BreakpointRules
+from .rules import RuleEngine
 from .scope import Scope
 
 
@@ -25,10 +27,18 @@ class ProxyServer:
     run_coroutine_threadsafe(), so the loop is NEVER closed between sessions.
     """
 
-    def __init__(self, port: int = 9090, scope: Scope | None = None) -> None:
+    def __init__(
+        self,
+        port: int = 9090,
+        scope: Scope | None = None,
+        breakpoints: BreakpointRules | None = None,
+        rules: RuleEngine | None = None,
+    ) -> None:
         self.port = port
         self.flow_queue: Queue = Queue()
         self.scope = scope or Scope()
+        self.breakpoints = breakpoints or BreakpointRules()
+        self.rules = rules or RuleEngine()
         self._master = None
         self._addon: GlimpseAddon | None = None
         self.running = False
@@ -95,6 +105,58 @@ class ProxyServer:
                 self.flow_queue.put(("error", f"Capture error: scope update failed: {exc}"))
 
         asyncio.run_coroutine_threadsafe(_update(), self._loop)
+
+    # ------------------------------------------------------------------ #
+    # Breakpoints / interactive intercept
+    # ------------------------------------------------------------------ #
+
+    def set_breakpoints(
+        self,
+        *,
+        patterns: list[str] | None = None,
+        on_request: bool | None = None,
+        on_response: bool | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        self.breakpoints.update(
+            patterns=patterns,
+            on_request=on_request,
+            on_response=on_response,
+            enabled=enabled,
+        )
+
+    def set_breakpoints_enabled(self, enabled: bool) -> None:
+        self.breakpoints.set_enabled(enabled)
+
+    def release_flow(self, flow_id: str, edits: dict | None) -> None:
+        """Resume a held flow (optionally with edits) on the loop thread."""
+        addon = self._addon
+        if addon is None:
+            return
+
+        async def _release() -> None:
+            addon.release(flow_id, edits)
+
+        asyncio.run_coroutine_threadsafe(_release(), self._loop)
+
+    def abort_flow(self, flow_id: str) -> None:
+        """Kill a held flow (drop the connection) on the loop thread."""
+        addon = self._addon
+        if addon is None:
+            return
+
+        async def _abort() -> None:
+            addon.abort(flow_id)
+
+        asyncio.run_coroutine_threadsafe(_abort(), self._loop)
+
+    # ------------------------------------------------------------------ #
+    # Mock / rewrite rules
+    # ------------------------------------------------------------------ #
+
+    def set_rules(self, rules: list[dict]) -> None:
+        """Update live mock/rewrite rules (takes effect immediately)."""
+        self.rules.update(rules)
 
     # ------------------------------------------------------------------ #
     # Certificate helpers
@@ -229,7 +291,12 @@ class ProxyServer:
                 opts.ignore_hosts = block_re
 
             master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-            addon = GlimpseAddon(self.flow_queue, scope=self.scope)
+            addon = GlimpseAddon(
+                self.flow_queue,
+                scope=self.scope,
+                breakpoints=self.breakpoints,
+                rules=self.rules,
+            )
             self._addon = addon
             master.addons.add(addon)
             self._master = master
@@ -241,6 +308,11 @@ class ProxyServer:
         async def _stop_watcher() -> None:
             while not self._stop_event.is_set():
                 await asyncio.sleep(0.1)
+            # Release any paused flows first so their suspended request/response
+            # hooks resume and exit — otherwise master.run() can wedge waiting on
+            # a held coroutine and stop would hang.
+            if self._addon is not None:
+                self._addon.drain()
             if master is not None:
                 master.shutdown()
 

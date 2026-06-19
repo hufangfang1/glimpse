@@ -11,37 +11,39 @@ from typing import Dict, Optional
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
-    QHBoxLayout,
+    QDockWidget,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QSpinBox,
-    QSplitter,
     QToolBar,
     QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
 from proxy.http_client import make_client
 from proxy.models import FlowModel
 from proxy.scope import Scope
+from proxy.breakpoints import BreakpointRules
+from proxy.rules import RuleEngine
 from proxy.server import ProxyServer
 from proxy.collections import CollectionStore
 from proxy.cookies import CapturedCookieJar
 from gui.i18n import LANGUAGES, i18n, tr
 from gui.themes import CONTROL_HEIGHT, DARK
+from gui.layout_presets import LayoutManager
 from gui.widgets.traffic_table import TrafficTable
 from gui.widgets.scope_dialog import ScopeDialog
 from gui.widgets.request_editor import RequestEditorPanel
+from gui.widgets.flow_inspector_window import FlowInspectorWindow
+from gui.widgets.intercept_panel import InterceptPanel
+from gui.widgets.breakpoint_dialog import BreakpointDialog
+from gui.widgets.rule_dialog import RuleDialog
 
 MAX_CAPTURED_FLOWS = 2000
-TRAFFIC_RAIL_WIDTH = 32          # collapsed width of the capture-records column
-TRAFFIC_PANEL_WIDTH = 488        # default expanded width of the table (520 - rail)
 
 
 class MainWindow(QMainWindow):
@@ -50,7 +52,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.resize(1280, 780)
 
-        self._server = ProxyServer(port=9090, scope=Scope.load())
+        self._server = ProxyServer(
+            port=9090,
+            scope=Scope.load(),
+            breakpoints=BreakpointRules.load(),
+            rules=RuleEngine.load(),
+        )
         self._flows: Dict[str, FlowModel] = {}
         self._selected_flow_id: Optional[str] = None
         # Saved-request collections + the live cookie jar fed from captured traffic.
@@ -59,15 +66,22 @@ class MainWindow(QMainWindow):
         # Track current proxy state so retranslate can refresh the status label
         # without flipping it back to "Stopped" mid-run.
         self._proxy_state: str = "stopped"   # "stopped" | "running" | "stopping"
-        # Collapse state for the left capture-records column (mirrors the editor drawer).
-        self._traffic_collapsed = False
-        self._traffic_width = TRAFFIC_PANEL_WIDTH
+        # Popped-out inspector windows — held so Qt doesn't GC the top-levels.
+        self._inspector_windows: list = []
+        self._intercept_auto_shown = False
+
+        self._layout = LayoutManager(self)
 
         self._build_ui()
         self._build_menu()
         self._apply_theme()
         self.retranslate()
         i18n.language_changed.connect(self.retranslate)
+
+        # Restore the last dock arrangement; fall back to the default preset.
+        if not self._layout.restore():
+            self._layout.apply("inspect")
+        self._editor_panel.new_draft()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_queue)
@@ -79,18 +93,19 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self._toolbar = QToolBar("Controls")
+        self._toolbar.setObjectName("main_toolbar")
         self._toolbar.setMovable(False)
         self._toolbar.setFloatable(False)
         self.addToolBar(self._toolbar)
 
         self._btn_start = QPushButton()
         self._btn_start.setObjectName("btn_start")
-        self._btn_start.setFixedWidth(90)
+        self._btn_start.setFixedWidth(80)
         self._btn_start.clicked.connect(self._start_proxy)
 
         self._btn_stop = QPushButton()
         self._btn_stop.setObjectName("btn_stop")
-        self._btn_stop.setFixedWidth(90)
+        self._btn_stop.setFixedWidth(80)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_proxy)
 
@@ -99,16 +114,16 @@ class MainWindow(QMainWindow):
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1024, 65535)
         self._port_spin.setValue(9090)
-        self._port_spin.setFixedWidth(70)
+        self._port_spin.setFixedWidth(64)
 
         self._btn_clear = QPushButton()
-        self._btn_clear.setFixedWidth(80)
+        self._btn_clear.setFixedWidth(72)
         self._btn_clear.clicked.connect(self._clear_traffic)
 
         self._filter_label = QLabel()
         self._filter_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
         self._filter_input = QLineEdit()
-        self._filter_input.setFixedWidth(220)
+        self._filter_input.setFixedWidth(170)
         self._filter_input.textChanged.connect(self._on_filter_changed)
 
         # Quick-filter presets (one-click common queries).
@@ -132,20 +147,39 @@ class MainWindow(QMainWindow):
         self._btn_filter_presets.setMenu(self._filter_menu)
 
         self._btn_replay = QPushButton()
-        self._btn_replay.setFixedWidth(96)
+        self._btn_replay.setFixedWidth(80)
         self._btn_replay.setEnabled(False)
         self._btn_replay.clicked.connect(self._replay_selected)
 
         self._btn_collections = QPushButton()
-        self._btn_collections.setFixedWidth(120)
+        self._btn_collections.setFixedWidth(104)
         self._btn_collections.clicked.connect(self._new_editor_draft)
 
         self._btn_scope = QPushButton()
-        self._btn_scope.setFixedWidth(110)
+        self._btn_scope.setFixedWidth(112)
         self._btn_scope.clicked.connect(self._edit_scope)
 
+        self._btn_breakpoints = QPushButton()
+        self._btn_breakpoints.setObjectName("btn_breakpoints")
+        self._btn_breakpoints.setCheckable(True)
+        self._btn_breakpoints.setFixedWidth(96)
+        self._btn_breakpoints.setChecked(self._server.breakpoints.snapshot()[0])
+        self._btn_breakpoints.toggled.connect(self._on_breakpoints_toggled)
+
+        self._btn_rules_menu = QPushButton()
+        self._btn_rules_menu.setObjectName("rules_menu")
+        self._btn_rules_menu.setFixedWidth(94)
+        self._rules_menu = QMenu(self)
+        self._act_breakpoints_open = QAction(self)
+        self._act_breakpoints_open.triggered.connect(self._edit_breakpoints)
+        self._act_rules_open = QAction(self)
+        self._act_rules_open.triggered.connect(self._edit_rules)
+        self._rules_menu.addAction(self._act_breakpoints_open)
+        self._rules_menu.addAction(self._act_rules_open)
+        self._btn_rules_menu.setMenu(self._rules_menu)
+
         self._btn_cert = QPushButton()
-        self._btn_cert.setFixedWidth(120)
+        self._btn_cert.setFixedWidth(104)
         self._btn_cert.clicked.connect(self._install_cert)
 
         self._toolbar.addWidget(self._btn_start)
@@ -161,12 +195,10 @@ class MainWindow(QMainWindow):
         self._toolbar.addWidget(self._filter_label)
         self._toolbar.addWidget(self._filter_input)
         self._toolbar.addWidget(self._btn_filter_presets)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._toolbar.addWidget(spacer)
+        self._toolbar.addSeparator()
         self._toolbar.addWidget(self._btn_scope)
-        self._toolbar.addWidget(self._btn_cert)
+        self._toolbar.addWidget(self._btn_breakpoints)
+        self._toolbar.addWidget(self._btn_rules_menu)
 
         for w in (
             self._btn_start,
@@ -177,38 +209,19 @@ class MainWindow(QMainWindow):
             self._btn_collections,
             self._filter_input,
             self._btn_scope,
-            self._btn_cert,
+            self._btn_breakpoints,
+            self._btn_rules_menu,
         ):
             w.setFixedHeight(CONTROL_HEIGHT)
 
         self._traffic_table = TrafficTable()
         self._traffic_table.flow_selected.connect(self._on_flow_selected)
+        self._traffic_table.inspect_requested.connect(self._open_inspector_window)
         self._traffic_table.replay_requested.connect(self._replay_flow)
         self._traffic_table.delete_requested.connect(self._delete_flow)
         self._traffic_table.filter_host_requested.connect(self._apply_host_filter)
         self._traffic_table.scope_add_requested.connect(self._add_to_scope)
         self._traffic_table.muted_changed.connect(self._on_muted_changed)
-
-        # Left rail holding the collapse/expand toggle (mirrors the editor drawer rail).
-        self._traffic_rail = QWidget()
-        self._traffic_rail.setObjectName("traffic_rail")
-        self._traffic_rail.setFixedWidth(TRAFFIC_RAIL_WIDTH)
-        traffic_rail_layout = QVBoxLayout(self._traffic_rail)
-        traffic_rail_layout.setContentsMargins(4, 8, 4, 8)
-        traffic_rail_layout.setSpacing(8)
-        self._btn_traffic_toggle = QToolButton()
-        self._btn_traffic_toggle.setObjectName("traffic_toggle")
-        self._btn_traffic_toggle.setFixedSize(24, 24)
-        self._btn_traffic_toggle.clicked.connect(self._toggle_traffic_panel)
-        traffic_rail_layout.addWidget(self._btn_traffic_toggle)
-        traffic_rail_layout.addStretch()
-
-        self._traffic_wrap = QWidget()
-        traffic_wrap_layout = QHBoxLayout(self._traffic_wrap)
-        traffic_wrap_layout.setContentsMargins(0, 0, 0, 0)
-        traffic_wrap_layout.setSpacing(0)
-        traffic_wrap_layout.addWidget(self._traffic_rail)
-        traffic_wrap_layout.addWidget(self._traffic_table, 1)
 
         self._editor_panel = RequestEditorPanel(
             store=self._collections,
@@ -216,13 +229,41 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._splitter.addWidget(self._traffic_wrap)
-        self._splitter.addWidget(self._editor_panel)
-        self._splitter.setSizes([520, 760])
-        self._splitter.setChildrenCollapsible(False)
+        # Each region is its own dock: float out to a second monitor, tab-stack,
+        # close, or re-summon from the View menu. objectName is mandatory — Qt's
+        # saveState/restoreState key off it, so layout persistence silently fails
+        # without it.
+        self.setDockNestingEnabled(True)
 
-        self.setCentralWidget(self._splitter)
+        self._dock_traffic = QDockWidget(self)
+        self._dock_traffic.setObjectName("dock_traffic")
+        self._dock_traffic.setWidget(self._traffic_table)
+
+        self._dock_inspector = QDockWidget(self)
+        self._dock_inspector.setObjectName("dock_inspector")
+        self._dock_inspector.setWidget(self._editor_panel)
+
+        self._intercept_panel = InterceptPanel()
+        self._intercept_panel.release_requested.connect(self._on_release_flow)
+        self._intercept_panel.abort_requested.connect(self._on_abort_flow)
+        self._dock_intercept = QDockWidget(self)
+        self._dock_intercept.setObjectName("dock_intercept")
+        self._dock_intercept.setWidget(self._intercept_panel)
+
+        feats = (
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        for dock in (self._dock_traffic, self._dock_inspector, self._dock_intercept):
+            dock.setFeatures(feats)
+            dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_traffic)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_inspector)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._dock_intercept)
+        # Intercept starts hidden; it auto-raises when a flow is held.
+        self._dock_intercept.hide()
 
         self._sb_status = QLabel()
         self._sb_status.setStyleSheet("color: #f38ba8;")
@@ -244,36 +285,6 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._sb_addr)
 
         self._update_scope_status()
-
-    # ------------------------------------------------------------------ #
-    # Capture-records column collapse/expand (mirrors the editor drawer)
-    # ------------------------------------------------------------------ #
-
-    def _toggle_traffic_panel(self) -> None:
-        self._set_traffic_collapsed(not self._traffic_collapsed)
-
-    def _set_traffic_collapsed(self, collapsed: bool) -> None:
-        # Remember the width the user dragged to, so expanding restores it.
-        if not self._traffic_collapsed and collapsed and self._traffic_table.width() > 0:
-            self._traffic_width = self._traffic_table.width()
-        self._traffic_collapsed = collapsed
-        self._traffic_table.setVisible(not collapsed)
-        total = max(self._splitter.width(), 400)
-        rail = TRAFFIC_RAIL_WIDTH
-        if collapsed:
-            self._splitter.setSizes([rail, total - rail])
-        else:
-            width = self._traffic_width + rail
-            self._splitter.setSizes([width, total - width])
-        self._sync_traffic_toggle_label()
-
-    def _sync_traffic_toggle_label(self) -> None:
-        if self._traffic_collapsed:
-            self._btn_traffic_toggle.setText("›")
-            self._btn_traffic_toggle.setToolTip(tr("toolbar.traffic.show"))
-        else:
-            self._btn_traffic_toggle.setText("‹")
-            self._btn_traffic_toggle.setToolTip(tr("toolbar.traffic.hide"))
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -322,6 +333,16 @@ class MainWindow(QMainWindow):
         self._act_scope.triggered.connect(self._edit_scope)
         self._edit_menu.addAction(self._act_scope)
 
+        self._act_breakpoints = QAction(self)
+        self._act_breakpoints.setShortcut(QKeySequence("Meta+B"))
+        self._act_breakpoints.triggered.connect(self._edit_breakpoints)
+        self._edit_menu.addAction(self._act_breakpoints)
+
+        self._act_rules = QAction(self)
+        self._act_rules.setShortcut(QKeySequence("Meta+M"))
+        self._act_rules.triggered.connect(self._edit_rules)
+        self._edit_menu.addAction(self._act_rules)
+
         # View menu — display options (more added in later phases).
         self._view_menu = menu.addMenu("")
         self._act_compact = QAction(self)
@@ -334,6 +355,26 @@ class MainWindow(QMainWindow):
         self._act_group.setShortcut(QKeySequence("Meta+G"))
         self._act_group.toggled.connect(self._traffic_table.set_grouped)
         self._view_menu.addAction(self._act_group)
+
+        # Dock show/hide — toggleViewAction() gives a checkable action whose
+        # state auto-syncs when the user closes the dock via its X button.
+        self._view_menu.addSeparator()
+        self._act_dock_traffic = self._dock_traffic.toggleViewAction()
+        self._act_dock_inspector = self._dock_inspector.toggleViewAction()
+        self._act_dock_intercept = self._dock_intercept.toggleViewAction()
+        self._view_menu.addAction(self._act_dock_traffic)
+        self._view_menu.addAction(self._act_dock_inspector)
+        self._view_menu.addAction(self._act_dock_intercept)
+
+        # Layout presets.
+        self._view_menu.addSeparator()
+        self._layout_menu = self._view_menu.addMenu("")
+        self._act_layout_monitor = self._layout_menu.addAction(
+            "", lambda: self._layout.apply("monitor"))
+        self._act_layout_inspect = self._layout_menu.addAction(
+            "", lambda: self._layout.apply("inspect"))
+        self._act_layout_compose = self._layout_menu.addAction(
+            "", lambda: self._layout.apply("compose"))
 
         # Language menu — checkable radio group.
         self._language_menu = menu.addMenu("")
@@ -350,6 +391,9 @@ class MainWindow(QMainWindow):
             self._language_actions[code] = act
 
         self._help_menu = menu.addMenu("")
+        self._act_install_cert = QAction(self)
+        self._act_install_cert.triggered.connect(self._install_cert)
+        self._help_menu.addAction(self._act_install_cert)
         self._act_setup = QAction(self)
         self._act_setup.triggered.connect(self._show_setup)
         self._help_menu.addAction(self._act_setup)
@@ -384,9 +428,14 @@ class MainWindow(QMainWindow):
         self._btn_collections.setToolTip(tr("toolbar.collections.tooltip"))
         self._btn_scope.setText(tr("toolbar.scope"))
         self._btn_scope.setToolTip(tr("toolbar.scope.tooltip"))
+        self._btn_breakpoints.setToolTip(tr("toolbar.breakpoints.tooltip"))
+        self._btn_rules_menu.setText(tr("toolbar.rules.menu"))
+        self._btn_rules_menu.setToolTip(tr("toolbar.rules.tooltip"))
         self._btn_cert.setText(tr("toolbar.cert"))
         self._btn_cert.setToolTip(tr("toolbar.cert.tooltip"))
-        self._sync_traffic_toggle_label()
+        self._act_breakpoints_open.setText(tr("menu.edit.breakpoints"))
+        self._act_rules_open.setText(tr("menu.edit.rules"))
+        self._refresh_breakpoints_button()
 
         # Menus
         self._file_menu.setTitle(tr("menu.file"))
@@ -400,16 +449,29 @@ class MainWindow(QMainWindow):
         self._act_copy_url.setText(tr("menu.edit.copy_url"))
         self._act_copy_curl.setText(tr("menu.edit.copy_curl"))
         self._act_scope.setText(tr("menu.edit.scope"))
+        self._act_breakpoints.setText(tr("menu.edit.breakpoints"))
+        self._act_rules.setText(tr("menu.edit.rules"))
 
         self._view_menu.setTitle(tr("menu.view"))
         self._act_compact.setText(tr("menu.view.compact"))
         self._act_group.setText(tr("menu.view.group"))
+        self._act_dock_traffic.setText(tr("menu.view.dock.traffic"))
+        self._act_dock_inspector.setText(tr("menu.view.dock.inspector"))
+        self._act_dock_intercept.setText(tr("menu.view.dock.intercept"))
+        self._layout_menu.setTitle(tr("menu.view.layout"))
+        self._act_layout_monitor.setText(tr("menu.view.layout.monitor"))
+        self._act_layout_inspect.setText(tr("menu.view.layout.inspect"))
+        self._act_layout_compose.setText(tr("menu.view.layout.compose"))
+        self._dock_traffic.setWindowTitle(tr("dock.traffic.title"))
+        self._dock_inspector.setWindowTitle(tr("dock.inspector.title"))
+        self._dock_intercept.setWindowTitle(tr("dock.intercept.title"))
 
         self._language_menu.setTitle(tr("menu.language"))
         for code, action in self._language_actions.items():
             action.setChecked(code == i18n.language)
 
         self._help_menu.setTitle(tr("menu.help"))
+        self._act_install_cert.setText(tr("menu.help.install_cert"))
         self._act_setup.setText(tr("menu.help.setup"))
 
         # Status — refresh the parts that depend on the current state.
@@ -440,6 +502,21 @@ class MainWindow(QMainWindow):
         if kind == "flow":
             flow: FlowModel = item[1]
             self._add_flow(flow)
+
+        elif kind == "intercept":
+            direction, flow_id, model = item[1], item[2], item[3]
+            self._on_intercept(direction, flow_id, model)
+
+        elif kind == "intercept_done":
+            flow_id = item[1]
+            self._intercept_panel.remove_held(flow_id)
+            self._maybe_hide_intercept()
+
+        elif kind == "rule_applied":
+            rule_kind, name = item[1], item[2]
+            self.statusBar().showMessage(
+                tr("status.rule_applied", kind=rule_kind, name=name), 2500
+            )
 
         elif kind == "ws_message":
             flow_id, msg = item[1], item[2]
@@ -612,6 +689,127 @@ class MainWindow(QMainWindow):
         self._selected_flow_id = flow.id if flow else None
         self._editor_panel.load_inspect_flow(flow)
         self._btn_replay.setEnabled(flow is not None)
+
+    def _open_inspector_window(self, flow: Optional[FlowModel]) -> None:
+        """Pop a captured flow into its own window (double-click / context menu).
+
+        Open two and place them side-by-side to compare requests; drag one to a
+        second display. Windows are tracked so Qt doesn't garbage-collect them.
+        """
+        if flow is None:
+            return
+        win = FlowInspectorWindow(
+            flow,
+            store=self._collections,
+            cookie_jar=self._cookie_jar,
+        )
+        win.closed.connect(self._on_inspector_closed)
+        self._inspector_windows.append(win)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _on_inspector_closed(self, win) -> None:
+        try:
+            self._inspector_windows.remove(win)
+        except ValueError:
+            pass
+
+    # ------------------------------------------------------------------ #
+    # Breakpoints / interactive intercept
+    # ------------------------------------------------------------------ #
+
+    def _on_intercept(self, direction: str, flow_id: str, model: FlowModel) -> None:
+        """A flow hit a breakpoint and is paused in the proxy."""
+        self._intercept_panel.add_held(direction, flow_id, model)
+        # Surface the intercept dock so the user notices the pause.
+        self._intercept_auto_shown = not self._dock_intercept.isVisible()
+        self._dock_intercept.show()
+        self._dock_intercept.raise_()
+        self.statusBar().showMessage(
+            tr("status.breakpoint_hit", method=model.method, url=model.url), 4000
+        )
+
+    def _on_release_flow(self, flow_id: str, edits) -> None:
+        self._server.release_flow(flow_id, edits)
+        self._maybe_hide_intercept()
+
+    def _on_abort_flow(self, flow_id: str) -> None:
+        self._server.abort_flow(flow_id)
+        self._maybe_hide_intercept()
+
+    def _maybe_hide_intercept(self) -> None:
+        if self._intercept_auto_shown and not self._intercept_panel.has_held():
+            self._dock_intercept.hide()
+            self._intercept_auto_shown = False
+
+    def _on_breakpoints_toggled(self, checked: bool) -> None:
+        self._server.set_breakpoints_enabled(checked)
+        try:
+            self._server.breakpoints.save()
+        except OSError:
+            pass
+        self._refresh_breakpoints_button()
+
+    def _refresh_breakpoints_button(self) -> None:
+        on = self._server.breakpoints.snapshot()[0]
+        if self._btn_breakpoints.isChecked() != on:
+            self._btn_breakpoints.blockSignals(True)
+            self._btn_breakpoints.setChecked(on)
+            self._btn_breakpoints.blockSignals(False)
+        self._btn_breakpoints.setText(
+            tr("toolbar.breakpoints.on_short") if on else tr("toolbar.breakpoints.off_short")
+        )
+        self._btn_breakpoints.setStyleSheet("")
+        self._btn_rules_menu.setText(tr("toolbar.rules.menu"))
+        self._btn_rules_menu.setStyleSheet("")
+        self._btn_rules_menu.setToolTip(
+            tr("toolbar.rules.tooltip")
+        )
+        if on:
+            self._btn_breakpoints.setStyleSheet(
+                "QPushButton#btn_breakpoints { background-color: #f38ba8; color: #1e1e2e; "
+                "border-color: #f38ba8; font-weight: 600; }"
+            )
+
+    def _edit_breakpoints(self) -> None:
+        enabled, patterns, on_request, on_response = self._server.breakpoints.snapshot()
+        dlg = BreakpointDialog(
+            enabled=enabled,
+            patterns=patterns,
+            on_request=on_request,
+            on_response=on_response,
+            parent=self,
+        )
+        if dlg.exec():
+            enabled, patterns, on_request, on_response = dlg.values()
+            self._server.set_breakpoints(
+                patterns=patterns,
+                on_request=on_request,
+                on_response=on_response,
+                enabled=enabled,
+            )
+            try:
+                self._server.breakpoints.save()
+            except OSError as exc:
+                self.statusBar().showMessage(str(exc), 5000)
+            # Keep the toolbar toggle in sync with the dialog's enable switch.
+            self._btn_breakpoints.blockSignals(True)
+            self._btn_breakpoints.setChecked(enabled)
+            self._btn_breakpoints.blockSignals(False)
+            self._refresh_breakpoints_button()
+
+    def _edit_rules(self) -> None:
+        dlg = RuleDialog(self._server.rules.snapshot(), parent=self)
+        if dlg.exec():
+            try:
+                rules = dlg.values()
+                self._server.set_rules(rules)
+                self._server.rules.save()
+            except (OSError, ValueError) as exc:
+                self.statusBar().showMessage(
+                    tr("status.rules_save_failed", exc=str(exc)), 5000
+                )
 
     def _apply_host_filter(self, host: str) -> None:
         self._filter_input.setText(host)
@@ -828,6 +1026,11 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        self._layout.save_current()
+        # Close any popped-out inspector windows (iterate a copy — closing each
+        # fires _on_inspector_closed which mutates the list).
+        for win in list(self._inspector_windows):
+            win.close()
         self._server.stop()
         self._timer.stop()
         super().closeEvent(event)

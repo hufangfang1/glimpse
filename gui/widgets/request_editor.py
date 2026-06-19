@@ -823,8 +823,8 @@ class RequestEditorPanel(QWidget):
     # ------------------------------------------------------------------ #
 
     def clear(self) -> None:
-        """Show placeholder when no flow is selected."""
-        self._work_stack.setCurrentWidget(self._placeholder)
+        """Return to the default blank compose view when no flow is selected."""
+        self.new_draft()
 
     def _show_work_area(self) -> None:
         self._work_stack.setCurrentWidget(self._work)

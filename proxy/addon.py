@@ -1,27 +1,69 @@
 """
 mitmproxy addon — captures HTTP / WebSocket flows and puts them
 into a thread-safe queue for the GUI to consume.
+
+It also implements interactive **breakpoints**: when a flow matches the
+breakpoint rules, the relevant addon hook (``request`` / ``response``) blocks on
+an ``asyncio.Event`` running in mitmproxy's loop thread while the GUI shows an
+edit panel. On release the GUI's edits — passed as a plain JSON-able dict, never
+a live mitmproxy object — are written back onto the real flow *inside the loop
+coroutine* (the only thread-safe place to touch a live flow) and the hook
+resumes, forwarding the mutated flow.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from queue import Queue
-from typing import Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from mitmproxy import http
 
+from .breakpoints import BreakpointRules
 from .models import FlowModel, WSMessage
+from .rules import RuleEngine
 from .scope import Scope
+
+# Default seconds to hold a flow before auto-releasing it unedited, so a
+# forgotten breakpoint never wedges a client connection indefinitely.
+INTERCEPT_TIMEOUT = 120.0
+
+
+@dataclass
+class HeldFlow:
+    """A flow paused at a breakpoint, awaiting release from the GUI."""
+
+    flow: http.HTTPFlow
+    event: asyncio.Event
+    direction: str                       # "request" | "response"
+    edits: Optional[dict] = None         # set by release(); applied on resume
+    aborted: bool = False
 
 
 class GlimpseAddon:
     """Mitmproxy addon that bridges captured flows to the GUI queue."""
 
-    def __init__(self, flow_queue: Queue, scope: Scope | None = None) -> None:
+    def __init__(
+        self,
+        flow_queue: Queue,
+        scope: Scope | None = None,
+        breakpoints: BreakpointRules | None = None,
+        rules: RuleEngine | None = None,
+    ) -> None:
         self.flow_queue = flow_queue
         self.scope = scope or Scope()
+        self.breakpoints = breakpoints or BreakpointRules()
+        self.rules = rules or RuleEngine()
+        self.intercept_timeout = INTERCEPT_TIMEOUT
         self._start_times: Dict[str, float] = {}
+        # flow.id -> HeldFlow for every currently-paused flow. Keyed per id so N
+        # flows can be held simultaneously, each with its own Event.
+        self._held: Dict[str, HeldFlow] = {}
 
     def clear(self) -> None:
         self._start_times.clear()
@@ -38,13 +80,290 @@ class GlimpseAddon:
         return self.scope.accepts(host)
 
     # ------------------------------------------------------------------ #
+    # Breakpoint handshake (runs in mitmproxy's loop thread)
+    # ------------------------------------------------------------------ #
+
+    async def _hold(self, flow: http.HTTPFlow, direction: str) -> None:
+        """Pause *flow* until the GUI releases it; apply any edits on resume."""
+        event = asyncio.Event()
+        held = HeldFlow(flow=flow, event=event, direction=direction)
+        self._held[flow.id] = held
+        try:
+            model = self._build_model(flow, 0.0)
+            self.flow_queue.put(("intercept", direction, flow.id, model))
+        except Exception as exc:
+            # If we can't even announce the hold, don't strand the connection.
+            self._held.pop(flow.id, None)
+            self.flow_queue.put(("error", f"Capture error: intercept failed: {exc}"))
+            return
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=self.intercept_timeout)
+        except asyncio.TimeoutError:
+            self.flow_queue.put(("intercept_done", flow.id, "timeout"))
+
+        held = self._held.pop(flow.id, None)
+        if held is None:
+            return
+        if held.aborted:
+            try:
+                flow.kill()
+            except Exception:
+                pass
+            return
+        if held.edits:
+            try:
+                if direction == "request":
+                    self._apply_request_edits(flow, held.edits)
+                else:
+                    self._apply_response_edits(flow, held.edits)
+            except Exception as exc:
+                self.flow_queue.put(("error", f"Capture error: apply edits failed: {exc}"))
+
+    def release(self, flow_id: str, edits: Optional[dict]) -> None:
+        """Resume a held flow, optionally with edits. Runs on the loop thread."""
+        held = self._held.get(flow_id)
+        if held is None:
+            return
+        held.edits = edits
+        held.event.set()
+
+    def abort(self, flow_id: str) -> None:
+        """Kill a held flow (drop the connection). Runs on the loop thread."""
+        held = self._held.get(flow_id)
+        if held is None:
+            return
+        held.aborted = True
+        held.event.set()
+
+    def drain(self) -> None:
+        """Release every held flow (called on shutdown so stop never hangs)."""
+        for held in list(self._held.values()):
+            held.event.set()
+
+    @staticmethod
+    def _apply_request_edits(flow: http.HTTPFlow, edits: dict) -> None:
+        req = flow.request
+        if "method" in edits and edits["method"]:
+            req.method = edits["method"]
+        if "url" in edits and edits["url"]:
+            req.url = edits["url"]
+        if "headers" in edits and edits["headers"] is not None:
+            req.headers.clear()
+            for key, value in edits["headers"]:
+                req.headers.add(key, value)
+        if "body" in edits and edits["body"] is not None:
+            req.content = edits["body"]
+
+    @staticmethod
+    def _apply_response_edits(flow: http.HTTPFlow, edits: dict) -> None:
+        resp = flow.response
+        if resp is None:
+            return
+        if "status_code" in edits and edits["status_code"] is not None:
+            resp.status_code = int(edits["status_code"])
+        if "headers" in edits and edits["headers"] is not None:
+            resp.headers.clear()
+            for key, value in edits["headers"]:
+                resp.headers.add(key, value)
+        if "body" in edits and edits["body"] is not None:
+            resp.content = edits["body"]
+
+    # ------------------------------------------------------------------ #
+    # Mock / rewrite rules (runs in mitmproxy's loop thread)
+    # ------------------------------------------------------------------ #
+
+    def _apply_request_rules(self, flow: http.HTTPFlow, url: str) -> None:
+        for rule in self.rules.matching("request_rewrite", url):
+            self._rewrite_request(flow, rule)
+
+    def _apply_mock_rules(self, flow: http.HTTPFlow, url: str) -> bool:
+        for rule in self.rules.matching("mock", url):
+            status = self._int(rule.get("status") or rule.get("status_code"), 200)
+            body = self._body_from_rule(rule)
+            headers = self._mock_headers(flow, rule)
+            flow.response = http.Response.make(status, body, headers)
+            self.flow_queue.put(("rule_applied", "mock", rule.get("name") or rule.get("match")))
+            return True
+        return False
+
+    def _apply_response_rules(self, flow: http.HTTPFlow, url: str) -> None:
+        if flow.response is None:
+            return
+        for rule in self.rules.matching("response_rewrite", url):
+            self._rewrite_response(flow, rule)
+
+    def _rewrite_request(self, flow: http.HTTPFlow, rule: Dict[str, Any]) -> None:
+        req = flow.request
+        redirect = str(rule.get("url") or rule.get("redirect_url") or "").strip()
+        if redirect:
+            req.url = redirect
+        self._apply_header_ops(req.headers, rule)
+        body = self._replace_body(req.content or b"", rule, req.headers.get("content-type", ""))
+        if body is not None:
+            req.content = body
+        self.flow_queue.put(("rule_applied", "request_rewrite", rule.get("name") or rule.get("match")))
+
+    def _rewrite_response(self, flow: http.HTTPFlow, rule: Dict[str, Any]) -> None:
+        resp = flow.response
+        if resp is None:
+            return
+        status = rule.get("status") or rule.get("status_code")
+        if status is not None:
+            resp.status_code = self._int(status, resp.status_code)
+        self._apply_header_ops(resp.headers, rule)
+        body = self._replace_body(resp.content or b"", rule, resp.headers.get("content-type", ""))
+        if body is not None:
+            resp.content = body
+        self.flow_queue.put(("rule_applied", "response_rewrite", rule.get("name") or rule.get("match")))
+
+    @staticmethod
+    def _headers(value: Any) -> Dict[str, str]:
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items()}
+        if isinstance(value, list):
+            out: Dict[str, str] = {}
+            for row in value:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    out[str(row[0])] = str(row[1])
+            return out
+        return {}
+
+    @classmethod
+    def _mock_headers(cls, flow: http.HTTPFlow, rule: Dict[str, Any]) -> Dict[str, str]:
+        headers = cls._headers(rule.get("headers"))
+        lower = {key.lower() for key in headers}
+
+        body = rule.get("body")
+        if isinstance(body, (dict, list)) and "content-type" not in lower:
+            headers["content-type"] = "application/json; charset=utf-8"
+
+        # Browser/WebView requests often rely on CORS headers that a breakpoint
+        # edit preserves from upstream, but a mock response would otherwise lose.
+        origin = flow.request.headers.get("origin")
+        if origin and "access-control-allow-origin" not in lower:
+            headers["access-control-allow-origin"] = origin
+            headers.setdefault("access-control-allow-credentials", "true")
+            headers.setdefault("vary", "Origin")
+
+        req_headers = flow.request.headers.get("access-control-request-headers")
+        if req_headers and "access-control-allow-headers" not in lower:
+            headers["access-control-allow-headers"] = req_headers
+        if "access-control-allow-methods" not in lower:
+            headers.setdefault(
+                "access-control-allow-methods",
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            )
+        return headers
+
+    @classmethod
+    def _apply_header_ops(cls, headers, rule: Dict[str, Any]) -> None:
+        remove = rule.get("remove_headers") or []
+        if isinstance(remove, str):
+            remove = [remove]
+        for name in remove if isinstance(remove, list) else []:
+            if name:
+                try:
+                    del headers[str(name)]
+                except KeyError:
+                    pass
+
+        set_headers = rule.get("set_headers")
+        if set_headers is None:
+            set_headers = rule.get("headers")
+        for key, value in cls._headers(set_headers).items():
+            headers[key] = value
+
+    @staticmethod
+    def _int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _body_from_rule(rule: Dict[str, Any]) -> bytes:
+        file_path = str(rule.get("file") or "").strip()
+        if file_path:
+            try:
+                return Path(os.path.expanduser(file_path)).read_bytes()
+            except OSError:
+                return b""
+        body = rule.get("body", b"")
+        if isinstance(body, bytes):
+            return body
+        if isinstance(body, (dict, list)):
+            return json.dumps(body, ensure_ascii=False).encode("utf-8")
+        if body is None:
+            return b""
+        return str(body).encode("utf-8")
+
+    @staticmethod
+    def _replace_body(body: bytes, rule: Dict[str, Any], content_type: str) -> Optional[bytes]:
+        if "body" in rule and rule.get("kind") != "mock":
+            value = rule.get("body")
+            if isinstance(value, bytes):
+                return value
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False).encode("utf-8")
+            return ("" if value is None else str(value)).encode("utf-8")
+
+        find = rule.get("body_find") or rule.get("find")
+        if find is None:
+            return None
+        replace = rule.get("body_replace")
+        if replace is None:
+            replace = rule.get("replace", "")
+
+        encoding = "utf-8"
+        if "charset=" in (content_type or "").lower():
+            encoding = content_type.lower().split("charset=", 1)[1].split(";", 1)[0].strip()
+        try:
+            text = body.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            text = body.decode("utf-8", errors="replace")
+            encoding = "utf-8"
+        return text.replace(str(find), str(replace)).encode(encoding, errors="replace")
+
+    # ------------------------------------------------------------------ #
     # HTTP hooks
     # ------------------------------------------------------------------ #
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         self._start_times[flow.id] = time.perf_counter()
+        if not self._in_scope(flow):
+            return
+        try:
+            url = flow.request.pretty_url
+        except Exception:
+            url = ""
+        try:
+            self._apply_request_rules(flow, url)
+            try:
+                url = flow.request.pretty_url
+            except Exception:
+                pass
+            mocked = self._apply_mock_rules(flow, url)
+        except Exception as exc:
+            mocked = False
+            self.flow_queue.put(("error", f"Capture error: rule failed: {exc}"))
+        if self.breakpoints.matches_request(url):
+            await self._hold(flow, "request")
+        if mocked:
+            return
 
-    def response(self, flow: http.HTTPFlow) -> None:
+    async def response(self, flow: http.HTTPFlow) -> None:
+        try:
+            url = flow.request.pretty_url
+        except Exception:
+            url = ""
+        try:
+            self._apply_response_rules(flow, url)
+        except Exception as exc:
+            self.flow_queue.put(("error", f"Capture error: rule failed: {exc}"))
+        if self.breakpoints.matches_response(url):
+            await self._hold(flow, "response")
+
         if not self._in_scope(flow):
             self._start_times.pop(flow.id, None)
             return
