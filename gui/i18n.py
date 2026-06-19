@@ -99,6 +99,7 @@ _EN: Dict[str, str] = {
     "menu.edit.scope": "Capture Scope…",
     "menu.view": "View",
     "menu.view.compact": "Compact rows",
+    "menu.view.group": "Group by host",
     "menu.language": "Language",
     "menu.help": "Help",
     "menu.help.setup": "Setup Instructions",
@@ -189,6 +190,7 @@ _EN: Dict[str, str] = {
     "col.time": "Time",
     "col.menu.title": "Columns",
     "col.menu.reset": "Reset columns",
+    "col.group": "Host / Path",
 
     # Traffic table — context menu
     "ctx.copy_url": "Copy URL",
@@ -371,6 +373,7 @@ _ZH: Dict[str, str] = {
     "menu.edit.scope": "抓包范围…",
     "menu.view": "视图",
     "menu.view.compact": "紧凑行高",
+    "menu.view.group": "按 host 分组",
     "menu.language": "语言",
     "menu.help": "帮助",
     "menu.help.setup": "使用说明",
@@ -457,6 +460,7 @@ _ZH: Dict[str, str] = {
     "col.time": "时间",
     "col.menu.title": "显示列",
     "col.menu.reset": "重置列",
+    "col.group": "Host / Path",
 
     # Traffic table — context menu
     "ctx.copy_url": "复制 URL",

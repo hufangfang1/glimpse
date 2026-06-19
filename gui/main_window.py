@@ -328,6 +328,12 @@ class MainWindow(QMainWindow):
         self._act_compact.toggled.connect(self._traffic_table.set_compact)
         self._view_menu.addAction(self._act_compact)
 
+        self._act_group = QAction(self)
+        self._act_group.setCheckable(True)
+        self._act_group.setShortcut(QKeySequence("Meta+G"))
+        self._act_group.toggled.connect(self._traffic_table.set_grouped)
+        self._view_menu.addAction(self._act_group)
+
         # Language menu — checkable radio group.
         self._language_menu = menu.addMenu("")
         self._language_group = QActionGroup(self)
@@ -396,6 +402,7 @@ class MainWindow(QMainWindow):
 
         self._view_menu.setTitle(tr("menu.view"))
         self._act_compact.setText(tr("menu.view.compact"))
+        self._act_group.setText(tr("menu.view.group"))
 
         self._language_menu.setTitle(tr("menu.language"))
         for code, action in self._language_actions.items():

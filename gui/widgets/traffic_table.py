@@ -15,12 +15,14 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtGui import QAction, QColor, QFont, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QMenu,
+    QStackedWidget,
     QTableView,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -315,6 +317,10 @@ class TrafficModel(QAbstractTableModel):
                 self.dataChanged.emit(tl, br)
                 return
 
+    def flows_with_seq(self) -> list:
+        """[(seq, flow), …] in arrival order — used to build the grouped tree."""
+        return list(zip(self._seqs, self._flows))
+
     def clear(self) -> None:
         self.beginResetModel()
         self._flows.clear()
@@ -408,9 +414,27 @@ class TrafficTable(QWidget):
         # Re-emit when clicking the already-selected row (e.g. switch back from collections).
         self._view.clicked.connect(self._on_row_clicked)
 
+        # Grouped view (by host): a tree rebuilt from the flat model on demand.
+        self._grouped = False
+        self._tree_model = QStandardItemModel(self)
+        self._tree = QTreeView()
+        self._tree.setModel(self._tree_model)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._tree.doubleClicked.connect(self._on_tree_double_clicked)
+        self._tree.selectionModel().selectionChanged.connect(self._on_tree_selection)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._view)   # 0 — flat table
+        self._stack.addWidget(self._tree)   # 1 — grouped tree
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._view)
+        layout.addWidget(self._stack)
 
         i18n.language_changed.connect(self._on_language_changed)
 
@@ -420,6 +444,7 @@ class TrafficTable(QWidget):
 
     def _on_language_changed(self, _lang: str) -> None:
         self._model.retranslate()
+        self._refresh_grouped()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -427,6 +452,7 @@ class TrafficTable(QWidget):
 
     def append_flow(self, flow: FlowModel) -> None:
         self._model.append_flow(flow)
+        self._refresh_grouped()
         # Only auto-follow when the user is sorted by arrival order ascending
         # (otherwise scrolling to bottom would jump them away from their sort).
         sort_col = self._view.horizontalHeader().sortIndicatorSection()
@@ -437,13 +463,16 @@ class TrafficTable(QWidget):
 
     def update_flow(self, flow: FlowModel) -> None:
         self._model.update_flow(flow)
+        self._refresh_grouped()
 
     def clear(self) -> None:
         self._model.clear()
+        self._refresh_grouped()
         self.flow_selected.emit(None)
 
     def set_filter(self, text: str) -> None:
         self._proxy.set_query(text)
+        self._refresh_grouped()
 
     def count(self) -> int:
         return self._model.rowCount()
@@ -455,14 +484,17 @@ class TrafficTable(QWidget):
     def mute_host(self, host: str) -> None:
         self._proxy.mute(host)
         self.muted_changed.emit()
+        self._refresh_grouped()
 
     def unmute_host(self, host: str) -> None:
         self._proxy.unmute(host)
         self.muted_changed.emit()
+        self._refresh_grouped()
 
     def clear_muted(self) -> None:
         self._proxy.clear_muted()
         self.muted_changed.emit()
+        self._refresh_grouped()
 
     def is_host_muted(self, host: str) -> bool:
         return self._proxy.is_muted(host)
@@ -558,11 +590,11 @@ class TrafficTable(QWidget):
         index = self._view.indexAt(pos)
         if not index.isValid():
             return
-
         flow = self._flow_at_proxy_row(index.row())
-        if flow is None:
-            return
+        if flow is not None:
+            self._show_flow_menu(flow, self._view.viewport().mapToGlobal(pos))
 
+    def _show_flow_menu(self, flow: FlowModel, global_pos) -> None:
         menu = QMenu(self)
         menu.setSeparatorsCollapsible(False)
 
@@ -654,7 +686,87 @@ class TrafficTable(QWidget):
         delete_font.setWeight(500)
         delete_act.setFont(delete_font)
 
-        menu.exec(self._view.viewport().mapToGlobal(pos))
+        menu.exec(global_pos)
+
+    # ------------------------------------------------------------------ #
+    # Grouped view (by host)
+    # ------------------------------------------------------------------ #
+
+    def set_grouped(self, grouped: bool) -> None:
+        self._grouped = bool(grouped)
+        if self._grouped:
+            self._rebuild_tree()
+        self._stack.setCurrentIndex(1 if self._grouped else 0)
+
+    def _refresh_grouped(self) -> None:
+        if self._grouped:
+            self._rebuild_tree()
+
+    @staticmethod
+    def _status_text(f: FlowModel) -> str:
+        if f.status_code:
+            return str(f.status_code)
+        return "ERR" if f.error else "-"
+
+    def _rebuild_tree(self) -> None:
+        """Rebuild the host-grouped tree from the flat model (filter + mute applied)."""
+        self._tree_model.clear()
+        self._tree_model.setHorizontalHeaderLabels(
+            [tr("col.group"), tr("col.method"), tr("col.status"), tr("col.seq")]
+        )
+        query = self._proxy._query
+        groups: dict = {}
+        for seq, flow in self._model.flows_with_seq():
+            host = flow.host or "—"
+            if self._proxy.is_muted(host):
+                continue
+            if query.strip() and not flow_matches_query(flow, query):
+                continue
+            groups.setdefault(host, []).append((seq, flow))
+
+        for host in sorted(groups):
+            rows = groups[host]
+            g0 = QStandardItem(f"{host}  ({len(rows)})")
+            grp = [g0, QStandardItem(), QStandardItem(), QStandardItem()]
+            for cell in grp:
+                cell.setEditable(False)
+            for seq, flow in rows:
+                c0 = QStandardItem(("★ " if flow.flagged else "") + (flow.path or "/"))
+                c1 = QStandardItem(flow.method)
+                c2 = QStandardItem(self._status_text(flow))
+                c3 = QStandardItem(str(seq))
+                c1.setForeground(QColor(METHOD_COLORS.get(flow.method, ("#cdd6f4", ""))[0]))
+                c2.setForeground(QColor(status_color(flow.status_code)))
+                for cell in (c0, c1, c2, c3):
+                    cell.setEditable(False)
+                    cell.setData(flow, Qt.ItemDataRole.UserRole)
+                    if flow.tag_color:
+                        cell.setBackground(QColor(flow.tag_color))
+                    if flow.note:
+                        cell.setToolTip(flow.note)
+                g0.appendRow([c0, c1, c2, c3])
+            self._tree_model.appendRow(grp)
+
+        self._tree.expandAll()
+        self._tree.setColumnWidth(0, 320)
+        self._tree.setColumnWidth(1, 72)
+        self._tree.setColumnWidth(2, 64)
+
+    def _on_tree_selection(self, *_) -> None:
+        idx = self._tree.currentIndex()
+        flow = idx.data(Qt.ItemDataRole.UserRole) if idx.isValid() else None
+        self.flow_selected.emit(flow)
+
+    def _on_tree_double_clicked(self, idx) -> None:
+        flow = idx.data(Qt.ItemDataRole.UserRole)
+        if flow is not None:
+            self.replay_requested.emit(flow)
+
+    def _on_tree_context_menu(self, pos) -> None:
+        idx = self._tree.indexAt(pos)
+        flow = idx.data(Qt.ItemDataRole.UserRole) if idx.isValid() else None
+        if flow is not None:
+            self._show_flow_menu(flow, self._tree.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------------ #
     # Context menu helpers
@@ -679,10 +791,12 @@ class TrafficTable(QWidget):
     def _toggle_flag(self, flow: FlowModel) -> None:
         flow.flagged = not flow.flagged
         self._model.mark_flow_changed(flow)
+        self._refresh_grouped()
 
     def _set_tag_color(self, flow: FlowModel, hex_color: str) -> None:
         flow.tag_color = hex_color
         self._model.mark_flow_changed(flow)
+        self._refresh_grouped()
 
     def _edit_note(self, flow: FlowModel) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -692,6 +806,7 @@ class TrafficTable(QWidget):
         if ok:
             flow.note = text.strip()
             self._model.mark_flow_changed(flow)
+            self._refresh_grouped()
 
     @staticmethod
     def _format_menu_header(flow: FlowModel) -> str:
