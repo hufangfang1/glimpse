@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
 
         # Quick-filter presets (one-click common queries).
         self._btn_filter_presets = QToolButton()
+        self._btn_filter_presets.setObjectName("filter_presets")
         self._btn_filter_presets.setText("▾")
         self._btn_filter_presets.setFixedHeight(CONTROL_HEIGHT)
         self._btn_filter_presets.setPopupMode(

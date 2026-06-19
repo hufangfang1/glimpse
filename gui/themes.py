@@ -387,6 +387,11 @@ QTableView::item:selected {
     color: #cdd6f4;
 }
 
+/* ── Filter presets button — drop Qt's extra menu-indicator arrow ── */
+QToolButton#filter_presets::menu-indicator {
+    image: none;
+}
+
 /* ── Grouped traffic tree (View ▸ Group by host) ─────────────────── */
 QTreeView {
     background-color: #1e1e2e;

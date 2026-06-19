@@ -421,6 +421,20 @@ class TrafficTable(QWidget):
         self._tree.setModel(self._tree_model)
         self._tree.setAlternatingRowColors(True)
         self._tree.setUniformRowHeights(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setIndentation(18)
+        # Native branch arrows render black (invisible on the dark bg); swap in the
+        # light chevron PNGs used elsewhere via QSS.
+        from gui.icons import ensure_tree_branch_icons
+        _br = ensure_tree_branch_icons()
+        self._tree.setStyleSheet(
+            "QTreeView::branch:has-children:!has-siblings:closed,"
+            "QTreeView::branch:closed:has-children:has-siblings {"
+            f'  border-image: none; image: url("{_br["closed"]}"); }}'
+            "QTreeView::branch:open:has-children:!has-siblings,"
+            "QTreeView::branch:open:has-children:has-siblings {"
+            f'  border-image: none; image: url("{_br["open"]}"); }}'
+        )
         self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
