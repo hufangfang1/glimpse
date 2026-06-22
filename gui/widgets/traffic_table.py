@@ -11,16 +11,26 @@ from typing import List, Optional
 from PyQt6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
+    QPointF,
     QSortFilterProxyModel,
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QFont, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QPainter,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QMenu,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
     QTableView,
     QTreeView,
     QVBoxLayout,
@@ -47,16 +57,106 @@ COLUMN_KEYS = [
 DEFAULT_COL_WIDTHS = [44, 160, 240, 72, 58, 120, 72, 78, 96]
 
 # Row tag colours (name, swatch emoji, dark-tint hex applied as row background).
+# The bg colour is also painted, but QSS `QTableView::item:selected` covers it
+# while the row is selected — the solid-square emoji shown in the path column
+# is the always-visible signal that survives selection too.
 TAG_COLORS = [
-    ("red", "🔴", "#3a2730"),
-    ("yellow", "🟡", "#3a3727"),
-    ("green", "🟢", "#273a2c"),
-    ("blue", "🔵", "#27313a"),
+    ("red", "🟥", "#7a2538"),
+    ("yellow", "🟨", "#7a5e1f"),
+    ("green", "🟩", "#1f6e3a"),
+    ("blue", "🟦", "#1f3a7a"),
 ]
 
 # Custom role used by the proxy model when sorting — lets us return typed
 # values (ints / floats / datetimes) instead of the displayed strings.
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+# Role that tags a grouped-tree top-level item with its host string, so the
+# collapse/expand handlers can identify the group regardless of label changes.
+HOST_DATA_ROLE = Qt.ItemDataRole.UserRole + 2
+# Role carrying the per-host pending count (unread since last expand). When > 0
+# the annotations delegate paints a tiny red dot next to the count.
+PENDING_DATA_ROLE = Qt.ItemDataRole.UserRole + 3
+
+
+def _row_markers(flow) -> str:
+    """Text glyphs shown in the path column. Only the note marker is text — the
+    colour tag is drawn as a vertical stripe by ``_AnnotationsDelegate``."""
+    return "📝" if flow.note else ""
+
+
+class _AnnotationsDelegate(QStyledItemDelegate):
+    """Owns all custom row paint so the visual cues survive QSS overrides.
+
+    Three independent layers:
+      1. Tag colour fill — painted BEFORE the standard text so the entire
+         row shows the tag tint. Only when the row is not selected (let the
+         selection colour win otherwise).
+      2. Tag stripe (col 0 only) — a 4 px-wide brighter bar at the left
+         edge, painted AFTER the standard text so it remains visible even
+         when the row is selected.
+      3. Pending dot (col 0 only) — tiny red circle next to a group row's
+         count text, painted from ``PENDING_DATA_ROLE``.
+
+    Applied to *every* column of both views (``setItemDelegate``), so the
+    bg fill covers the whole row even where QSS would otherwise hide a
+    model ``BackgroundRole``.
+    """
+
+    DOT_RADIUS = 3.0
+    STRIPE_WIDTH = 4
+    # Alpha for the tag tint overlay. Painted LAST (after text + selection) so
+    # nothing can hide it; translucent so the text and selection stay legible.
+    TINT_ALPHA = 120
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+        if not index.isValid():
+            return
+
+        flow = index.data(Qt.ItemDataRole.UserRole)
+        tag = getattr(flow, "tag_color", "") if flow is not None else ""
+
+        # Tag tint — a translucent fill over the WHOLE cell, drawn after the
+        # standard rendering. Works whether the row is selected or not, and is
+        # immune to QSS item-background rules (it's the final paint pass).
+        if tag:
+            overlay = QColor(tag)
+            overlay.setAlpha(self.TINT_ALPHA)
+            painter.fillRect(option.rect, overlay)
+
+        if index.column() != 0:
+            return
+
+        # Pending unread badge — group rows in the host tree.
+        pending = index.data(PENDING_DATA_ROLE)
+        if pending:
+            text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+            tw = option.fontMetrics.horizontalAdvance(text)
+            rect = option.rect
+            x = min(rect.left() + tw + 8, rect.right() - 5)
+            y = rect.top() + rect.height() // 3
+            self._dot(painter, x, y, QColor("#ef4444"))
+            return
+
+        # Solid bright stripe at the left edge — an extra always-obvious cue.
+        if tag:
+            rect = option.rect
+            painter.fillRect(
+                rect.left(),
+                rect.top() + 1,
+                self.STRIPE_WIDTH,
+                rect.height() - 2,
+                QColor(tag).lighter(150),
+            )
+
+    @classmethod
+    def _dot(cls, painter, x: float, y: float, color: QColor) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(x, y), cls.DOT_RADIUS, cls.DOT_RADIUS)
+        painter.restore()
 
 
 def _match_status(code: Optional[int], val: str) -> bool:
@@ -250,7 +350,10 @@ class TrafficModel(QAbstractTableModel):
     def _display(self, f: FlowModel, row: int, col: int) -> str:
         if col == 0: return ("★ " if f.flagged else "") + str(self._seqs[row])
         if col == 1: return f.host
-        if col == 2: return f.path or "/"
+        if col == 2:
+            markers = _row_markers(f)
+            path = f.path or "/"
+            return f"{markers}  {path}" if markers else path
         if col == 3: return f.method
         if col == 4:
             if f.status_code:
@@ -416,10 +519,26 @@ class TrafficTable(QWidget):
         self._view.clicked.connect(self._on_row_clicked)
 
         # Grouped view (by host): a tree rebuilt from the flat model on demand.
+        # State preserved across rebuilds so an open flow doesn't keep re-expanding
+        # collapsed groups: _collapsed_hosts is the truth, _last_counts feeds the
+        # delta calc, _pending is the unread-since-collapse counter shown as a red
+        # badge on the group label.
         self._grouped = False
+        self._collapsed_hosts: set[str] = set()
+        self._last_counts: dict[str, int] = {}
+        self._pending: dict[str, int] = {}
         self._tree_model = QStandardItemModel(self)
         self._tree = QTreeView()
         self._tree.setModel(self._tree_model)
+        self._tree.expanded.connect(self._on_group_expanded)
+        self._tree.collapsed.connect(self._on_group_collapsed)
+
+        # Custom delegate paints the tag bg + left stripe + unread-badge dot.
+        # Applied to the WHOLE view so every cell gets the tag-colour bg fill
+        # (QSS otherwise hides the model BackgroundRole on some themes).
+        self._annotations_delegate = _AnnotationsDelegate(self)
+        self._view.setItemDelegate(self._annotations_delegate)
+        self._tree.setItemDelegate(self._annotations_delegate)
         self._tree.setAlternatingRowColors(True)
         self._tree.setUniformRowHeights(True)
         self._tree.setRootIsDecorated(True)
@@ -482,6 +601,10 @@ class TrafficTable(QWidget):
 
     def clear(self) -> None:
         self._model.clear()
+        # Drop unread/seen counters but keep _collapsed_hosts so the user's
+        # previously-collapsed hosts stay collapsed when they come back.
+        self._last_counts.clear()
+        self._pending.clear()
         self._refresh_grouped()
         self.flow_selected.emit(None)
 
@@ -726,7 +849,12 @@ class TrafficTable(QWidget):
         return "ERR" if f.error else "-"
 
     def _rebuild_tree(self) -> None:
-        """Rebuild the host-grouped tree from the flat model (filter + mute applied)."""
+        """Rebuild the host-grouped tree from the flat model (filter + mute applied).
+
+        Collapsed groups stay collapsed across rebuilds — new flows are tallied
+        into ``_pending[host]`` and surfaced as a red badge on the group label
+        instead of forcing the group open.
+        """
         self._tree_model.clear()
         self._tree_model.setHorizontalHeaderLabels(
             [tr("col.group"), tr("col.method"), tr("col.status"), tr("col.seq")]
@@ -741,14 +869,38 @@ class TrafficTable(QWidget):
                 continue
             groups.setdefault(host, []).append((seq, flow))
 
+        # Update pending counts from the delta vs the previous rebuild.
+        for host, rows in groups.items():
+            new_count = len(rows)
+            old_count = self._last_counts.get(host, 0)
+            delta = new_count - old_count
+            if host in self._collapsed_hosts:
+                if delta > 0:
+                    self._pending[host] = self._pending.get(host, 0) + delta
+            else:
+                # Open group → the user can see everything, no unread to track.
+                self._pending[host] = 0
+            self._last_counts[host] = new_count
+        for host in list(self._last_counts.keys()):
+            if host not in groups:
+                self._last_counts.pop(host, None)
+                self._pending.pop(host, None)
+
         for host in sorted(groups):
             rows = groups[host]
-            g0 = QStandardItem(f"{host}  ({len(rows)})")
+            pending = self._pending.get(host, 0)
+            g0 = QStandardItem(self._format_group_label(host, len(rows), pending))
+            g0.setData(host, HOST_DATA_ROLE)
+            g0.setData(pending, PENDING_DATA_ROLE)
             grp = [g0, QStandardItem(), QStandardItem(), QStandardItem()]
             for cell in grp:
                 cell.setEditable(False)
             for seq, flow in rows:
-                c0 = QStandardItem(("★ " if flow.flagged else "") + (flow.path or "/"))
+                markers = _row_markers(flow)
+                path = flow.path or "/"
+                star = "★ " if flow.flagged else ""
+                label = star + (f"{markers}  {path}" if markers else path)
+                c0 = QStandardItem(label)
                 c1 = QStandardItem(flow.method)
                 c2 = QStandardItem(self._status_text(flow))
                 c3 = QStandardItem(str(seq))
@@ -764,10 +916,38 @@ class TrafficTable(QWidget):
                 g0.appendRow([c0, c1, c2, c3])
             self._tree_model.appendRow(grp)
 
-        self._tree.expandAll()
+        # Apply expansion state from `_collapsed_hosts`. New hosts default open.
+        for row in range(self._tree_model.rowCount()):
+            idx = self._tree_model.index(row, 0)
+            host = idx.data(HOST_DATA_ROLE)
+            self._tree.setExpanded(idx, host not in self._collapsed_hosts)
+
         self._tree.setColumnWidth(0, 320)
         self._tree.setColumnWidth(1, 72)
         self._tree.setColumnWidth(2, 64)
+
+    @staticmethod
+    def _format_group_label(host: str, count: int, _pending: int) -> str:
+        # Count accumulates as flows arrive; the small red dot is painted by
+        # _AnnotationsDelegate based on PENDING_DATA_ROLE, not encoded here.
+        return f"{host}  ({count})"
+
+    def _on_group_expanded(self, idx) -> None:
+        """Group opened → drop unread counter so the delegate stops painting the dot."""
+        host = idx.data(HOST_DATA_ROLE)
+        if not host:
+            return
+        self._collapsed_hosts.discard(host)
+        if self._pending.get(host, 0):
+            self._pending[host] = 0
+            item = self._tree_model.itemFromIndex(idx)
+            if item is not None:
+                item.setData(0, PENDING_DATA_ROLE)
+
+    def _on_group_collapsed(self, idx) -> None:
+        host = idx.data(HOST_DATA_ROLE)
+        if host:
+            self._collapsed_hosts.add(host)
 
     def _on_tree_selection(self, *_) -> None:
         idx = self._tree.currentIndex()
@@ -801,7 +981,12 @@ class TrafficTable(QWidget):
 
     def _add_menu_action(self, menu: QMenu, icon: str, label: str, callback) -> QAction:
         action = QAction(self._icon_prefix(icon) + label, menu)
-        action.triggered.connect(callback)
+        # QAction.triggered emits a `checked` bool. PyQt binds it to the first
+        # optional parameter of the slot, which silently clobbered callbacks
+        # written as ``lambda h=hexv: ...`` (h became False, not the colour).
+        # Swallow every signal arg so callbacks always run with their intended
+        # captured defaults.
+        action.triggered.connect(lambda *_: callback())
         menu.addAction(action)
         return action
 
