@@ -8,10 +8,11 @@ import uuid
 from queue import Empty
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
     QDockWidget,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -19,9 +20,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSizePolicy,
     QToolBar,
     QToolButton,
     QWidget,
+    QWidgetAction,
 )
 
 from proxy.http_client import make_client
@@ -42,8 +45,72 @@ from gui.widgets.flow_inspector_window import FlowInspectorWindow
 from gui.widgets.intercept_panel import InterceptPanel
 from gui.widgets.breakpoint_dialog import BreakpointDialog
 from gui.widgets.rule_dialog import RuleDialog
+from gui.widgets.wireguard_dialog import WireGuardDialog
 
 MAX_CAPTURED_FLOWS = 2000
+FILTER_INLINE_MIN_WIDTH = 1500
+
+
+class _ModeSelector(QPushButton):
+    """Menu-backed selector without macOS' native ComboBox popup chrome."""
+
+    currentDataChanged = pyqtSignal(object)
+    _BUTTON_INDENT = "\u2003"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._menu = QMenu(self)
+        self._menu.setObjectName("mode_menu")
+        self._actions: list[QAction] = []
+        self._labels: list[str] = []
+        self._current_index = -1
+        self.setMenu(self._menu)
+
+    def addItem(self, text: str, data) -> None:
+        action = QAction(text, self)
+        action.setData(data)
+        action.triggered.connect(
+            lambda _checked=False, a=action: self._select_action(a)
+        )
+        self._menu.addAction(action)
+        self._actions.append(action)
+        self._labels.append(text)
+        if len(self._actions) == 1:
+            self._select_action(action)
+
+    def setItemText(self, index: int, text: str) -> None:
+        self._labels[index] = text
+        self._refresh_menu_labels()
+        if index == self._current_index:
+            self.setText(self._button_text(text))
+
+    def currentData(self):
+        if self._current_index < 0:
+            return None
+        return self._actions[self._current_index].data()
+
+    def setCurrentIndex(self, index: int) -> None:
+        self._select_action(self._actions[index])
+
+    def _select_action(self, action: QAction) -> None:
+        index = self._actions.index(action)
+        changed = index != self._current_index
+        self._current_index = index
+        self.setText(self._button_text(self._labels[self._current_index]))
+        self._refresh_menu_labels()
+        if changed:
+            self.currentDataChanged.emit(action.data())
+
+    @classmethod
+    def _button_text(cls, text: str) -> str:
+        """Add a stable visual inset; macOS ignores button text padding here."""
+        return cls._BUTTON_INDENT + text
+
+    def _refresh_menu_labels(self) -> None:
+        """Use a text glyph so the checkmark shares the label's baseline."""
+        for index, action in enumerate(self._actions):
+            prefix = "✓  " if index == self._current_index else "    "
+            action.setText(prefix + self._labels[index])
 
 
 class MainWindow(QMainWindow):
@@ -81,6 +148,10 @@ class MainWindow(QMainWindow):
         # Restore the last dock arrangement; fall back to the default preset.
         if not self._layout.restore():
             self._layout.apply("inspect")
+        # restoreState() also restores toolbar placement from older layouts.
+        # Re-assert our responsive arrangement after the window has a real size.
+        self._filter_on_main_toolbar = None
+        QTimer.singleShot(0, self._update_filter_toolbar)
         self._editor_panel.new_draft()
 
         self._timer = QTimer(self)
@@ -98,32 +169,50 @@ class MainWindow(QMainWindow):
         self._toolbar.setFloatable(False)
         self.addToolBar(self._toolbar)
 
+        self._tools_toolbar = QToolBar("Tools")
+        self._tools_toolbar.setObjectName("tools_toolbar")
+        self._tools_toolbar.setMovable(False)
+        self._tools_toolbar.setFloatable(False)
+        self.addToolBar(self._tools_toolbar)
+        self.insertToolBarBreak(self._tools_toolbar)
+
         self._btn_start = QPushButton()
         self._btn_start.setObjectName("btn_start")
-        self._btn_start.setFixedWidth(80)
+        self._btn_start.setFixedWidth(72)
         self._btn_start.clicked.connect(self._start_proxy)
 
         self._btn_stop = QPushButton()
         self._btn_stop.setObjectName("btn_stop")
-        self._btn_stop.setFixedWidth(80)
+        self._btn_stop.setFixedWidth(72)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_proxy)
 
         self._port_label = QLabel()
         self._port_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
         self._port_spin = QSpinBox()
+        self._port_spin.setObjectName("proxy_port")
         self._port_spin.setRange(1024, 65535)
         self._port_spin.setValue(9090)
-        self._port_spin.setFixedWidth(64)
+        self._port_spin.setFixedWidth(76)
+
+        self._mode_label = QLabel()
+        self._mode_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
+        self._mode_combo = _ModeSelector(self)
+        self._mode_combo.setObjectName("mode_selector")
+        self._mode_combo.setFixedWidth(182)
+        self._mode_combo.addItem("", False)
+        self._mode_combo.addItem("", True)
+        self._mode_combo.currentDataChanged.connect(self._on_proxy_mode_changed)
+        self._port_spin.valueChanged.connect(self._on_proxy_port_changed)
 
         self._btn_clear = QPushButton()
-        self._btn_clear.setFixedWidth(72)
+        self._btn_clear.setFixedWidth(76)
         self._btn_clear.clicked.connect(self._clear_traffic)
 
         self._filter_label = QLabel()
         self._filter_label.setStyleSheet("color: #a6adc8; margin-left: 8px;")
         self._filter_input = QLineEdit()
-        self._filter_input.setFixedWidth(170)
+        self._filter_input.setMinimumWidth(170)
         self._filter_input.textChanged.connect(self._on_filter_changed)
 
         # Quick-filter presets (one-click common queries).
@@ -147,28 +236,28 @@ class MainWindow(QMainWindow):
         self._btn_filter_presets.setMenu(self._filter_menu)
 
         self._btn_replay = QPushButton()
-        self._btn_replay.setFixedWidth(80)
+        self._btn_replay.setFixedWidth(72)
         self._btn_replay.setEnabled(False)
         self._btn_replay.clicked.connect(self._replay_selected)
 
         self._btn_collections = QPushButton()
-        self._btn_collections.setFixedWidth(104)
+        self._btn_collections.setFixedWidth(94)
         self._btn_collections.clicked.connect(self._new_editor_draft)
 
         self._btn_scope = QPushButton()
-        self._btn_scope.setFixedWidth(112)
+        self._btn_scope.setFixedWidth(100)
         self._btn_scope.clicked.connect(self._edit_scope)
 
         self._btn_breakpoints = QPushButton()
         self._btn_breakpoints.setObjectName("btn_breakpoints")
         self._btn_breakpoints.setCheckable(True)
-        self._btn_breakpoints.setFixedWidth(96)
+        self._btn_breakpoints.setFixedWidth(88)
         self._btn_breakpoints.setChecked(self._server.breakpoints.snapshot()[0])
         self._btn_breakpoints.toggled.connect(self._on_breakpoints_toggled)
 
         self._btn_rules_menu = QPushButton()
         self._btn_rules_menu.setObjectName("rules_menu")
-        self._btn_rules_menu.setFixedWidth(94)
+        self._btn_rules_menu.setFixedWidth(82)
         self._rules_menu = QMenu(self)
         self._act_breakpoints_open = QAction(self)
         self._act_breakpoints_open.triggered.connect(self._edit_breakpoints)
@@ -179,31 +268,53 @@ class MainWindow(QMainWindow):
         self._btn_rules_menu.setMenu(self._rules_menu)
 
         self._btn_cert = QPushButton()
-        self._btn_cert.setFixedWidth(104)
+        self._btn_cert.setFixedWidth(94)
         self._btn_cert.clicked.connect(self._install_cert)
+
+        self._btn_wireguard = QPushButton()
+        self._btn_wireguard.setFixedWidth(98)
+        self._btn_wireguard.clicked.connect(self._show_wireguard)
 
         self._toolbar.addWidget(self._btn_start)
         self._toolbar.addWidget(self._btn_stop)
         self._toolbar.addSeparator()
-        self._toolbar.addWidget(self._port_label)
         self._toolbar.addWidget(self._port_spin)
+        self._toolbar.addWidget(self._mode_combo)
         self._toolbar.addSeparator()
         self._toolbar.addWidget(self._btn_clear)
         self._toolbar.addWidget(self._btn_replay)
         self._toolbar.addWidget(self._btn_collections)
         self._toolbar.addSeparator()
-        self._toolbar.addWidget(self._filter_label)
-        self._toolbar.addWidget(self._filter_input)
-        self._toolbar.addWidget(self._btn_filter_presets)
-        self._toolbar.addSeparator()
         self._toolbar.addWidget(self._btn_scope)
         self._toolbar.addWidget(self._btn_breakpoints)
         self._toolbar.addWidget(self._btn_rules_menu)
+        self._toolbar.addWidget(self._btn_cert)
+        self._toolbar.addWidget(self._btn_wireguard)
+
+        self._filter_input.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._filter_bar = QWidget()
+        self._filter_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        filter_layout = QHBoxLayout(self._filter_bar)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+        filter_layout.addWidget(self._filter_label)
+        filter_layout.addWidget(self._filter_input, 1)
+        filter_layout.addWidget(self._btn_filter_presets)
+        self._filter_action = QWidgetAction(self)
+        self._filter_action.setDefaultWidget(self._filter_bar)
+        self._tools_toolbar.addAction(self._filter_action)
 
         for w in (
             self._btn_start,
             self._btn_stop,
             self._port_spin,
+            self._mode_combo,
             self._btn_clear,
             self._btn_replay,
             self._btn_collections,
@@ -211,6 +322,8 @@ class MainWindow(QMainWindow):
             self._btn_scope,
             self._btn_breakpoints,
             self._btn_rules_menu,
+            self._btn_cert,
+            self._btn_wireguard,
         ):
             w.setFixedHeight(CONTROL_HEIGHT)
 
@@ -285,6 +398,23 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._sb_addr)
 
         self._update_scope_status()
+
+    def _update_filter_toolbar(self) -> None:
+        """Keep the filter inline on wide windows and wrap it on narrow ones."""
+        inline = self.width() >= FILTER_INLINE_MIN_WIDTH
+        if self._filter_on_main_toolbar == inline:
+            return
+
+        self._toolbar.removeAction(self._filter_action)
+        self._tools_toolbar.removeAction(self._filter_action)
+        if inline:
+            self._toolbar.addAction(self._filter_action)
+            self._tools_toolbar.hide()
+        else:
+            self._tools_toolbar.show()
+            self.insertToolBarBreak(self._tools_toolbar)
+            self._tools_toolbar.addAction(self._filter_action)
+        self._filter_on_main_toolbar = inline
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -394,6 +524,9 @@ class MainWindow(QMainWindow):
         self._act_install_cert = QAction(self)
         self._act_install_cert.triggered.connect(self._install_cert)
         self._help_menu.addAction(self._act_install_cert)
+        self._act_wireguard = QAction(self)
+        self._act_wireguard.triggered.connect(self._show_wireguard)
+        self._help_menu.addAction(self._act_wireguard)
         self._act_setup = QAction(self)
         self._act_setup.triggered.connect(self._show_setup)
         self._help_menu.addAction(self._act_setup)
@@ -410,9 +543,19 @@ class MainWindow(QMainWindow):
 
         # Toolbar
         self._toolbar.setWindowTitle(tr("toolbar.controls"))
+        self._tools_toolbar.setWindowTitle(tr("toolbar.tools"))
         self._btn_start.setText(tr("toolbar.start"))
         self._btn_stop.setText(tr("toolbar.stop"))
         self._port_label.setText(tr("toolbar.port"))
+        self._mode_label.setText(tr("toolbar.mode"))
+        self._mode_combo.setItemText(0, tr("toolbar.mode.regular"))
+        self._mode_combo.setItemText(1, tr("toolbar.mode.wireguard"))
+        self._mode_combo.setToolTip(tr("toolbar.mode.tooltip"))
+        self._port_spin.setToolTip(
+            tr("toolbar.port.wireguard.tooltip")
+            if self._mode_combo.currentData()
+            else tr("toolbar.port.http.tooltip")
+        )
         self._btn_clear.setText(tr("toolbar.clear"))
         self._filter_label.setText(tr("toolbar.filter"))
         self._filter_input.setPlaceholderText(tr("toolbar.filter.placeholder"))
@@ -433,6 +576,8 @@ class MainWindow(QMainWindow):
         self._btn_rules_menu.setToolTip(tr("toolbar.rules.tooltip"))
         self._btn_cert.setText(tr("toolbar.cert"))
         self._btn_cert.setToolTip(tr("toolbar.cert.tooltip"))
+        self._btn_wireguard.setText(tr("toolbar.wireguard"))
+        self._btn_wireguard.setToolTip(tr("toolbar.wireguard.tooltip"))
         self._act_breakpoints_open.setText(tr("menu.edit.breakpoints"))
         self._act_rules_open.setText(tr("menu.edit.rules"))
         self._refresh_breakpoints_button()
@@ -472,6 +617,7 @@ class MainWindow(QMainWindow):
 
         self._help_menu.setTitle(tr("menu.help"))
         self._act_install_cert.setText(tr("menu.help.install_cert"))
+        self._act_wireguard.setText(tr("menu.help.wireguard"))
         self._act_setup.setText(tr("menu.help.setup"))
 
         # Status — refresh the parts that depend on the current state.
@@ -544,6 +690,58 @@ class MainWindow(QMainWindow):
                     tr("dialog.start_failed.text", exc=err_msg),
                 )
 
+        elif kind == "wireguard_ready":
+            gen = item[1]
+            if gen == self._server._generation and self._proxy_state == "running":
+                self._refresh_address_label()
+                self.statusBar().showMessage(
+                    tr("status.wireguard_ready", port=self._server.wireguard_port),
+                    4000,
+                )
+
+        elif kind == "scope_applied":
+            gen = item[1]
+            if gen == self._server._generation:
+                self.statusBar().showMessage(
+                    tr("status.scope_applied"), 3000
+                )
+
+        elif kind == "scope_reconnecting":
+            gen, revision, count = item[1], item[2], item[3]
+            if (
+                gen == self._server._generation
+                and revision == self._server.scope_revision
+            ):
+                self.statusBar().showMessage(
+                    tr("status.scope_reconnecting", n=count), 15000
+                )
+
+        elif kind == "scope_reconnected":
+            gen, revision, host = item[1], item[2], item[3]
+            if (
+                gen == self._server._generation
+                and revision == self._server.scope_revision
+                and self._proxy_state == "running"
+            ):
+                self.statusBar().showMessage(
+                    tr("status.scope_reconnected", host=host), 8000
+                )
+                QMessageBox.information(
+                    self,
+                    tr("dialog.scope_reconnected.title"),
+                    tr("dialog.scope_reconnected.text", host=host),
+                )
+
+        elif kind == "scope_reconnect_timeout":
+            gen, revision = item[1], item[2]
+            if (
+                gen == self._server._generation
+                and revision == self._server.scope_revision
+            ):
+                self.statusBar().showMessage(
+                    tr("status.scope_reconnect_timeout"), 8000
+                )
+
         elif kind == "stopped":
             gen = item[1]
             self._on_proxy_stopped(gen)
@@ -577,9 +775,31 @@ class MainWindow(QMainWindow):
     # Proxy control
     # ------------------------------------------------------------------ #
 
+    def _on_proxy_mode_changed(self, wireguard: bool) -> None:
+        self._port_spin.setValue(
+            self._server.wireguard_port if wireguard else self._server.port
+        )
+        self._port_spin.setToolTip(
+            tr("toolbar.port.wireguard.tooltip")
+            if wireguard
+            else tr("toolbar.port.http.tooltip")
+        )
+        self._refresh_address_label()
+
+    def _on_proxy_port_changed(self, port: int) -> None:
+        if self._mode_combo.currentData():
+            self._server.wireguard_port = port
+        else:
+            self._server.port = port
+
     def _start_proxy(self) -> None:
         port = self._port_spin.value()
-        self._server.port = port
+        wireguard = bool(self._mode_combo.currentData())
+        self._server.wireguard_enabled = wireguard
+        if wireguard:
+            self._server.wireguard_port = port
+        else:
+            self._server.port = port
         try:
             self._server.start()
         except Exception as exc:
@@ -593,6 +813,7 @@ class MainWindow(QMainWindow):
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._port_spin.setEnabled(False)
+        self._mode_combo.setEnabled(False)
         self._proxy_state = "running"
         self._refresh_status_label()
         self._refresh_address_label()
@@ -602,6 +823,7 @@ class MainWindow(QMainWindow):
         self._btn_stop.setEnabled(False)
         self._btn_start.setEnabled(False)
         self._port_spin.setEnabled(False)
+        self._mode_combo.setEnabled(False)
         self._proxy_state = "stopping"
         self._refresh_status_label()
 
@@ -612,6 +834,7 @@ class MainWindow(QMainWindow):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._port_spin.setEnabled(True)
+        self._mode_combo.setEnabled(True)
         self._proxy_state = "stopped"
         self._refresh_status_label()
         self._sb_addr.setText("")
@@ -666,7 +889,14 @@ class MainWindow(QMainWindow):
         except Exception:
             lan = "127.0.0.1"
         self._sb_addr.setText(
-            tr("status.address", port=self._server.port, lan=lan)
+            tr(
+                "status.address_wireguard"
+                if self._server.wireguard_enabled
+                else "status.address",
+                port=self._server.port,
+                lan=lan,
+                wireguard_port=self._server.wireguard_port,
+            )
         )
 
     # ------------------------------------------------------------------ #
@@ -978,6 +1208,27 @@ class MainWindow(QMainWindow):
         self._editor_panel.new_draft()
 
     # ------------------------------------------------------------------ #
+    # WireGuard setup
+    # ------------------------------------------------------------------ #
+
+    def _show_wireguard(self) -> None:
+        config = self._server.wireguard_config
+        if not config:
+            if not self._server.wireguard_enabled:
+                message = tr("dialog.wireguard.not_enabled")
+            elif self._proxy_state == "running":
+                message = tr("dialog.wireguard.starting")
+            else:
+                message = tr("dialog.wireguard.not_running")
+            QMessageBox.information(
+                self,
+                tr("dialog.wireguard.title"),
+                message,
+            )
+            return
+        WireGuardDialog(config, self).exec()
+
+    # ------------------------------------------------------------------ #
     # Certificate installation
     # ------------------------------------------------------------------ #
 
@@ -1022,8 +1273,18 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             tr("dialog.setup.title"),
-            tr("dialog.setup.text", lan=lan),
+            tr(
+                "dialog.setup.text",
+                lan=lan,
+                port=self._server.port,
+                wireguard_port=self._server.wireguard_port,
+            ),
         )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_filter_action"):
+            QTimer.singleShot(0, self._update_filter_toolbar)
 
     def closeEvent(self, event) -> None:
         self._layout.save_current()

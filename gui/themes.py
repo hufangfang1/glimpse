@@ -254,6 +254,11 @@ QPushButton::menu-indicator {
     width: 10px;
     height: 10px;
 }
+QPushButton#mode_selector {
+    text-align: left;
+    padding-left: 4px;
+    padding-right: 28px;
+}
 
 /* ── LineEdit / SpinBox ──────────────────────────────────────────── */
 QLineEdit, QSpinBox {
@@ -269,6 +274,10 @@ QLineEdit, QSpinBox {
 }
 QLineEdit:focus, QSpinBox:focus {
     border-color: #89b4fa;
+}
+QSpinBox#proxy_port {
+    min-height: 28px;
+    max-height: 28px;
 }
 QLineEdit#editor_url_input,
 QLineEdit#editor_name_input {

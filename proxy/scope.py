@@ -84,8 +84,39 @@ class Scope:
             [self._fnmatch_to_regex(p) for p in block],
         )
 
+    def to_mitm_options(self) -> tuple[List[str], List[str]]:
+        """Return mutually-exclusive ``allow_hosts`` / ``ignore_hosts`` values.
+
+        mitmproxy rejects configurations where both options are populated.
+        Glimpse, however, supports Allow and Block at the same time with Block
+        taking precedence. When Allow is active we therefore fold Block into a
+        negative lookahead and only populate ``allow_hosts``. With no Allow
+        list, Block maps directly to ``ignore_hosts``.
+        """
+        allow, block = self.snapshot()
+        if not allow:
+            return [], [self._fnmatch_to_regex(p) for p in block]
+
+        allow_bodies = [self._fnmatch_body(p) for p in allow]
+        if not block:
+            return [
+                "^" + body + r"(?::\d+)?$"
+                for body in allow_bodies
+            ], []
+
+        blocked = "|".join(
+            "(?:" + self._fnmatch_body(p) + ")"
+            for p in block
+        )
+        return [
+            r"^(?!(?:" + blocked + r")(?::\d+)?$)"
+            + body
+            + r"(?::\d+)?$"
+            for body in allow_bodies
+        ], []
+
     @staticmethod
-    def _fnmatch_to_regex(pattern: str) -> str:
+    def _fnmatch_body(pattern: str) -> str:
         out: List[str] = []
         for ch in pattern:
             if ch == "*":
@@ -96,7 +127,11 @@ class Scope:
                 out.append("\\" + ch)
             else:
                 out.append(ch)
-        return "^" + "".join(out) + r"(?::\d+)?$"
+        return "".join(out)
+
+    @classmethod
+    def _fnmatch_to_regex(cls, pattern: str) -> str:
+        return "^" + cls._fnmatch_body(pattern) + r"(?::\d+)?$"
 
     def accepts(self, host: str) -> bool:
         """Return True if a flow for *host* should be captured/shown."""

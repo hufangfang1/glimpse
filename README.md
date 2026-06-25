@@ -16,7 +16,7 @@
 - iOS / Android 移动端抓包（监听 `0.0.0.0`，状态栏显示 LAN IP）
 - WebSocket：右侧显示消息流（只读，不可发送）
 - **抓取作用域 (Capture Scope)**：白名单 / 黑名单 host 模式，支持 `*.example.com` 通配
-  - 接入 mitmproxy 的 `allow_hosts` / `ignore_hosts`，白名单外的 HTTPS 直接透传，不解 TLS
+  - 接入 mitmproxy 的 `allow_hosts` / `ignore_hosts`；Allow + Block 会合并为互斥安全的规则，白名单外的 HTTPS 直接透传、不解 TLS
   - 解决飞书、银行等做了 SSL Pinning 的 App "网络不可用"问题
   - 右键流量可一键加入白/黑名单（自动推荐精确域名与 `*.parent.com` 通配）
 - 代理意外退出（睡眠 / 网络重置）后自动重启，无需手动恢复
@@ -152,11 +152,25 @@ python main.py
 
 ### iOS / Android 移动设备抓包
 
+#### HTTP 代理模式（默认）
+
 1. 确保手机和电脑在**同一 Wi-Fi** 下
 2. 启动代理后，查看状态栏中的 **LAN IP**（如 `192.168.1.100:9090`）
    - 在手机 Wi-Fi 详情页设置 HTTP 代理为该地址
 3. 在手机浏览器访问 `http://mitm.it`，下载并安装 mitmproxy 证书
    - iOS 还需在「设置 → 通用 → 关于本机 → 证书信任设置」中启用该证书
+
+#### WireGuard 模式（适合忽略 HTTP 代理设置的 App）
+
+1. 启动前把工具栏的模式切换为 **WireGuard**
+2. 点击 **▶ Start**，等待状态栏提示 WireGuard 已就绪
+3. 打开 **帮助 → WireGuard 设置…**，在手机 WireGuard App 中扫描二维码并启用隧道
+4. 手机与 Mac 仍需网络互通；默认监听 `51820/UDP`
+5. HTTPS 解密仍需安装并信任 mitmproxy CA；SSL Pinning 不会因 WireGuard 模式而失效
+
+HTTP 代理与 WireGuard 是互斥模式，一次只启动一个入口。WireGuard 能接住
+不遵循系统 HTTP 代理设置的 TCP/UDP 流量，但 Glimpse/mitmproxy 仍只会
+完整解析其支持的应用层协议，且不能绕过 App 内部的证书固定或业务层加密。
 
 ### 配置抓取范围（Capture Scope）
 

@@ -42,6 +42,7 @@ _EN: Dict[str, str] = {
     "app.title": "Glimpse — HTTP Debugger",
     "common.ok": "OK",
     "common.cancel": "Cancel",
+    "common.close": "Close",
     "common.save": "Save",
     "common.apply": "Apply",
     "common.clear_all": "Clear All",
@@ -49,9 +50,16 @@ _EN: Dict[str, str] = {
 
     # Toolbar
     "toolbar.controls": "Controls",
+    "toolbar.tools": "Capture Tools",
     "toolbar.start": "▶  Start",
     "toolbar.stop": "■  Stop",
     "toolbar.port": "Port:",
+    "toolbar.port.http.tooltip": "HTTP proxy TCP port",
+    "toolbar.port.wireguard.tooltip": "WireGuard UDP port",
+    "toolbar.mode": "Mode:",
+    "toolbar.mode.regular": "HTTP proxy",
+    "toolbar.mode.wireguard": "WireGuard",
+    "toolbar.mode.tooltip": "Choose one capture entry mode",
     "toolbar.clear": "🗑  Clear",
     "toolbar.filter": "Filter:",
     "toolbar.filter.placeholder": "host / status:5xx / slow:>500ms …",
@@ -72,6 +80,8 @@ _EN: Dict[str, str] = {
     "toolbar.rules.tooltip": "Edit automatic mock and rewrite rules  (⌘M)",
     "toolbar.cert": "🔐 Install Cert",
     "toolbar.cert.tooltip": "Install mitmproxy CA certificate into macOS system keychain",
+    "toolbar.wireguard": "WireGuard",
+    "toolbar.wireguard.tooltip": "Show the WireGuard QR code or current setup status",
 
     # Status bar
     "status.stopped": "● Stopped",
@@ -83,8 +93,14 @@ _EN: Dict[str, str] = {
     "status.requests.filtered": "{shown} / {total} requests",
     "status.muted": "🔇 {n} muted",
     "status.address": "127.0.0.1:{port}  ·  LAN {lan}:{port}  ·  configure HTTP proxy in your browser/system",
+    "status.address_wireguard": "WireGuard {lan}:{wireguard_port}/UDP",
+    "status.wireguard_ready": "WireGuard is ready on UDP {port}; open Help → WireGuard Setup to connect",
     "status.scope_save_failed": "Failed to save scope: {exc}",
-    "status.scope_added": "Added to {kind}list: {pattern} · keep-alive connections need an app reconnect",
+    "status.scope_applied": "Capture scope applied · non-matching hosts pass through without capture",
+    "status.scope_reconnecting": "Capture scope applied · reset {n} matching old connection(s), waiting for reconnection…",
+    "status.scope_reconnected": "✓ Reconnected to {host} · ready to capture",
+    "status.scope_reconnect_timeout": "No matching reconnection detected yet · open the target app/page to retry",
+    "status.scope_added": "Added to {kind}list: {pattern}",
     "status.scope_exists": "'{pattern}' is already in the {kind}list",
     "status.kind.allow": "allow",
     "status.kind.block": "block",
@@ -161,6 +177,7 @@ _EN: Dict[str, str] = {
     "menu.language": "Language",
     "menu.help": "Help",
     "menu.help.install_cert": "Install Certificate…",
+    "menu.help.wireguard": "WireGuard Setup…",
     "menu.help.setup": "Setup Instructions",
 
     # Dialogs — proxy / cert / setup
@@ -183,17 +200,40 @@ _EN: Dict[str, str] = {
     "dialog.cert.installed_ok": "Certificate installed into the system keychain. Restart your browser to apply.",
     "dialog.cert.cancelled": "Installation cancelled.",
     "dialog.cert.osascript_failed": "Failed to invoke osascript: {exc}",
+    "dialog.wireguard.title": "WireGuard Setup",
+    "dialog.wireguard.hint": (
+        "Install the WireGuard app on the phone, add a tunnel by scanning this "
+        "QR code, then enable it. The endpoint uses this Mac's LAN address."
+    ),
+    "dialog.wireguard.copy": "Copy Config",
+    "dialog.wireguard.not_enabled": (
+        "WireGuard mode is not selected. Stop the proxy, select "
+        "“WireGuard”, and start it again."
+    ),
+    "dialog.wireguard.starting": (
+        "WireGuard is still starting. Please try again in a moment."
+    ),
+    "dialog.wireguard.not_running": (
+        "WireGuard is selected but the proxy is not running. Start the proxy first."
+    ),
+    "dialog.scope_reconnected.title": "Connection Ready",
+    "dialog.scope_reconnected.text": (
+        "A new interceptable connection to {host} has been established.\n\n"
+        "You can start testing now."
+    ),
     "dialog.setup.title": "Setup Instructions",
     "dialog.setup.text": (
-        "1. Click ▶ Start to launch the proxy (default port 9090)\n\n"
+        "1. Click ▶ Start to launch the proxy (port {port})\n\n"
         "2. Desktop browser — set HTTP proxy to:\n"
-        "   Host: 127.0.0.1   Port: 9090\n\n"
+        "   Host: 127.0.0.1   Port: {port}\n\n"
         "3. Mobile device (same Wi-Fi) — set HTTP proxy to:\n"
-        "   Host: {lan}   Port: 9090\n\n"
+        "   Host: {lan}   Port: {port}\n\n"
         "4. For HTTPS decryption, click 🔐 Install Cert\n"
         "   (macOS will prompt for administrator password)\n\n"
         "5. On iOS/Android, also install the cert from http://mitm.it\n\n"
-        "6. Filter traffic using the search bar in the toolbar."
+        "6. For apps that ignore HTTP proxy settings, select WireGuard\n"
+        "   before starting, then open Help → WireGuard Setup (UDP {wireguard_port}).\n\n"
+        "7. Filter traffic using the search bar in the toolbar."
     ),
 
     # Detail panel — placeholder & tabs
@@ -375,6 +415,7 @@ _ZH: Dict[str, str] = {
     "app.title": "Glimpse — HTTP 抓包工具",
     "common.ok": "确定",
     "common.cancel": "取消",
+    "common.close": "关闭",
     "common.save": "保存",
     "common.apply": "应用",
     "common.clear_all": "全部清空",
@@ -382,9 +423,16 @@ _ZH: Dict[str, str] = {
 
     # Toolbar
     "toolbar.controls": "控制",
+    "toolbar.tools": "抓包工具",
     "toolbar.start": "▶  启动",
     "toolbar.stop": "■  停止",
     "toolbar.port": "端口：",
+    "toolbar.port.http.tooltip": "HTTP 代理 TCP 端口",
+    "toolbar.port.wireguard.tooltip": "WireGuard UDP 端口",
+    "toolbar.mode": "模式：",
+    "toolbar.mode.regular": "HTTP 代理",
+    "toolbar.mode.wireguard": "WireGuard",
+    "toolbar.mode.tooltip": "选择一种抓包接入模式",
     "toolbar.clear": "🗑  清空",
     "toolbar.filter": "过滤：",
     "toolbar.filter.placeholder": "host / status:5xx / slow:>500ms …",
@@ -405,6 +453,8 @@ _ZH: Dict[str, str] = {
     "toolbar.rules.tooltip": "编辑自动 Mock 与改写规则  (⌘M)",
     "toolbar.cert": "🔐 安装证书",
     "toolbar.cert.tooltip": "把 mitmproxy CA 证书安装到 macOS 系统钥匙串",
+    "toolbar.wireguard": "WireGuard",
+    "toolbar.wireguard.tooltip": "显示 WireGuard 二维码或当前设置状态",
 
     # Status bar
     "status.stopped": "● 已停止",
@@ -416,8 +466,14 @@ _ZH: Dict[str, str] = {
     "status.requests.filtered": "{shown} / {total} 个请求",
     "status.muted": "🔇 静音 {n}",
     "status.address": "127.0.0.1:{port}  ·  LAN {lan}:{port}  ·  请配置浏览器/系统 HTTP 代理",
+    "status.address_wireguard": "WireGuard {lan}:{wireguard_port}/UDP",
+    "status.wireguard_ready": "WireGuard 已在 UDP {port} 就绪，请打开「帮助 → WireGuard 设置」连接",
     "status.scope_save_failed": "Scope 保存失败：{exc}",
-    "status.scope_added": "已加入{kind}名单：{pattern} · 长连接需让 App 重连后生效",
+    "status.scope_applied": "抓包范围已生效 · 未匹配域名直接透传且不记录",
+    "status.scope_reconnecting": "抓包范围已生效 · 已刷新 {n} 条目标旧连接，正在等待重连…",
+    "status.scope_reconnected": "✓ {host} 重连成功，可以开始抓包测试",
+    "status.scope_reconnect_timeout": "暂未检测到符合新规则的连接，请打开目标 App/页面后重试",
+    "status.scope_added": "已加入{kind}名单：{pattern}",
     "status.scope_exists": "'{pattern}' 已在{kind}名单中",
     "status.kind.allow": "白",
     "status.kind.block": "黑",
@@ -494,6 +550,7 @@ _ZH: Dict[str, str] = {
     "menu.language": "语言",
     "menu.help": "帮助",
     "menu.help.install_cert": "安装证书…",
+    "menu.help.wireguard": "WireGuard 设置…",
     "menu.help.setup": "使用说明",
 
     # Dialogs — proxy / cert / setup
@@ -512,17 +569,38 @@ _ZH: Dict[str, str] = {
     "dialog.cert.installed_ok": "证书已成功安装到登录钥匙串，请重启浏览器后生效。",
     "dialog.cert.cancelled": "已取消安装。",
     "dialog.cert.osascript_failed": "无法调用 osascript：{exc}",
+    "dialog.wireguard.title": "WireGuard 设置",
+    "dialog.wireguard.hint": (
+        "在手机安装 WireGuard App，选择扫描二维码添加隧道，然后启用。"
+        "配置中的 Endpoint 已使用这台 Mac 的局域网地址。"
+    ),
+    "dialog.wireguard.copy": "复制配置",
+    "dialog.wireguard.not_enabled": (
+        "当前没有选择 WireGuard 模式。请停止代理，选择「WireGuard」，"
+        "然后重新启动。"
+    ),
+    "dialog.wireguard.starting": "WireGuard 正在启动，请稍后再试。",
+    "dialog.wireguard.not_running": (
+        "已选择 WireGuard 模式，但代理尚未运行。请先启动代理。"
+    ),
+    "dialog.scope_reconnected.title": "连接已就绪",
+    "dialog.scope_reconnected.text": (
+        "{host} 已建立新的可抓包连接。\n\n"
+        "现在可以开始测试了。"
+    ),
     "dialog.setup.title": "使用说明",
     "dialog.setup.text": (
-        "1. 点击 ▶ 启动 启动代理（默认端口 9090）\n\n"
+        "1. 点击 ▶ 启动 启动代理（端口 {port}）\n\n"
         "2. 桌面浏览器 — 将 HTTP 代理设为：\n"
-        "   Host: 127.0.0.1   Port: 9090\n\n"
+        "   Host: 127.0.0.1   Port: {port}\n\n"
         "3. 移动设备（同一 Wi-Fi）— 将 HTTP 代理设为：\n"
-        "   Host: {lan}   Port: 9090\n\n"
+        "   Host: {lan}   Port: {port}\n\n"
         "4. 如需解密 HTTPS，请点击 🔐 安装证书\n"
         "   （macOS 会弹出管理员密码框）\n\n"
         "5. iOS/Android 还需要从 http://mitm.it 安装证书\n\n"
-        "6. 工具栏的搜索框可以按 host/path/method 过滤流量。"
+        "6. 对于忽略 HTTP 代理设置的 App，请在启动前选择 WireGuard，\n"
+        "   然后打开「帮助 → WireGuard 设置」（UDP {wireguard_port}）。\n\n"
+        "7. 工具栏的搜索框可以按 host/path/method 过滤流量。"
     ),
 
     # Detail panel — placeholder & tabs

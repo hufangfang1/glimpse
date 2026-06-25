@@ -22,7 +22,7 @@ from queue import Queue
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-from mitmproxy import http
+from mitmproxy import connection, http, tls
 
 from .breakpoints import BreakpointRules
 from .models import FlowModel, WSMessage
@@ -54,16 +54,22 @@ class GlimpseAddon:
         scope: Scope | None = None,
         breakpoints: BreakpointRules | None = None,
         rules: RuleEngine | None = None,
+        wireguard_mode: bool = False,
     ) -> None:
         self.flow_queue = flow_queue
         self.scope = scope or Scope()
         self.breakpoints = breakpoints or BreakpointRules()
         self.rules = rules or RuleEngine()
+        self.wireguard_mode = wireguard_mode
         self.intercept_timeout = INTERCEPT_TIMEOUT
         self._start_times: Dict[str, float] = {}
         # flow.id -> HeldFlow for every currently-paused flow. Keyed per id so N
         # flows can be held simultaneously, each with its own Event.
         self._held: Dict[str, HeldFlow] = {}
+        self._scope_reconnect_generation: int | None = None
+        self._scope_reconnect_revision: int | None = None
+        self._scope_reconnect_patterns: list[str] = []
+        self._wireguard_passthrough_hosts: Dict[str, str] = {}
 
     def clear(self) -> None:
         self._start_times.clear()
@@ -71,6 +77,86 @@ class GlimpseAddon:
     # ------------------------------------------------------------------ #
     # Scope filter
     # ------------------------------------------------------------------ #
+
+    def begin_scope_reconnect(
+        self,
+        generation: int,
+        revision: int,
+        patterns: list[str],
+    ) -> None:
+        """Wait for a fresh connection that matches the updated allow list."""
+        self._scope_reconnect_generation = generation
+        self._scope_reconnect_revision = revision
+        self._scope_reconnect_patterns = list(patterns)
+
+    def expire_scope_reconnect(self, revision: int) -> bool:
+        """Stop waiting for *revision* and report whether it was still pending."""
+        if self._scope_reconnect_revision != revision:
+            return False
+        self._scope_reconnect_generation = None
+        self._scope_reconnect_revision = None
+        self._scope_reconnect_patterns = []
+        return True
+
+    def cancel_scope_reconnect(self) -> None:
+        self._scope_reconnect_generation = None
+        self._scope_reconnect_revision = None
+        self._scope_reconnect_patterns = []
+
+    def _confirm_scope_reconnect(self, host: str) -> None:
+        generation = self._scope_reconnect_generation
+        revision = self._scope_reconnect_revision
+        if generation is None or revision is None:
+            return
+        host = (host or "").lower().rstrip(".")
+        if not host or not self.scope.accepts(host):
+            return
+        patterns = self._scope_reconnect_patterns
+        if patterns and not Scope._any_match(host, patterns):
+            return
+        self._scope_reconnect_generation = None
+        self._scope_reconnect_revision = None
+        self._scope_reconnect_patterns = []
+        self.flow_queue.put(("scope_reconnected", generation, revision, host))
+
+    def tls_established_client(self, data: tls.TlsData) -> None:
+        """Confirm that a newly intercepted TLS connection is usable."""
+        host = data.context.client.sni or ""
+        if not host and data.context.server.address:
+            host = data.context.server.address[0]
+        self._confirm_scope_reconnect(host)
+
+    def tls_clienthello(self, data: tls.ClientHelloData) -> None:
+        """Apply WireGuard scope after SNI is available.
+
+        mitmproxy's global allow_hosts/ignore_hosts check happens too early for
+        WireGuard's virtual destination addresses and can leave passthrough
+        traffic unroutable. At ClientHello time the real hostname is available,
+        so deciding here preserves connectivity for non-matching hosts.
+        """
+        if not self.wireguard_mode:
+            return
+        host = data.client_hello.sni or ""
+        if not host and data.context.server.address:
+            host = data.context.server.address[0]
+        allow, _ = self.scope.snapshot()
+        if (allow and not host) or not self.scope.accepts(host):
+            data.ignore_connection = True
+            if host:
+                self._wireguard_passthrough_hosts[data.context.client.id] = (
+                    host.lower().rstrip(".")
+                )
+
+    def client_disconnected(self, client: connection.Client) -> None:
+        self._wireguard_passthrough_hosts.pop(client.id, None)
+
+    def passthrough_client_ids(self, patterns: list[str]) -> set[str]:
+        """Return WireGuard passthrough connections newly covered by patterns."""
+        return {
+            client_id
+            for client_id, host in self._wireguard_passthrough_hosts.items()
+            if Scope._any_match(host, patterns)
+        }
 
     def _in_scope(self, flow: http.HTTPFlow) -> bool:
         try:
@@ -331,6 +417,10 @@ class GlimpseAddon:
 
     async def request(self, flow: http.HTTPFlow) -> None:
         self._start_times[flow.id] = time.perf_counter()
+        try:
+            self._confirm_scope_reconnect(flow.request.pretty_host or "")
+        except Exception:
+            pass
         if not self._in_scope(flow):
             return
         try:
