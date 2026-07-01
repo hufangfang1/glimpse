@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal, Tuple
 
 ChromeCookieError = Literal[
-    "keychain_denied", "keychain_unavailable", "no_database", "decrypt_unavailable"
+    "keychain_denied", "keychain_unavailable", "no_database",
+    "decrypt_unavailable", "permission_denied",
 ]
 
 # (key, value) cookie pairs.
@@ -220,21 +221,39 @@ class ChromeCookieRead:
     error: ChromeCookieError | None = None
 
 
-def _chrome_cookie_db_paths() -> List[Path]:
-    """Discover Chromium-style ``Cookies`` SQLite DBs (all profiles)."""
+def _chrome_cookie_db_paths() -> Tuple[List[Path], bool]:
+    """Discover Chromium-style ``Cookies`` SQLite DBs across all profiles.
+
+    Returns ``(db_paths, permission_denied)``. On macOS, a packaged ``.app`` that
+    lacks Full Disk Access cannot list ``~/Library/Application Support/<browser>``
+    even when the cookie DB is right there — ``iterdir`` raises ``PermissionError``
+    (TCC ``Operation not permitted``). We surface that as a distinct signal so the
+    UI can tell the user to grant access, instead of falsely claiming the browser
+    is not installed.
+    """
     roots = [
         Path.home() / "Library" / "Application Support" / "Google" / "Chrome",
         Path.home() / "Library" / "Application Support" / "Chromium",
         Path.home() / "Library" / "Application Support" / "Microsoft Edge",
     ]
     found: List[Path] = []
+    denied = False
     for root in roots:
-        if not root.is_dir():
+        try:
+            entries = sorted(root.iterdir())
+        except PermissionError:
+            denied = True
             continue
-        for db in sorted(root.glob("*/Cookies")):
-            if db.is_file():
-                found.append(db)
-    return found
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            continue
+        for entry in entries:
+            db = entry / "Cookies"
+            try:
+                if db.is_file():
+                    found.append(db)
+            except OSError:
+                continue
+    return found, denied
 
 
 def _chrome_safe_storage_key(service: str = "Chrome") -> tuple[bytes | None, ChromeCookieError | None]:
@@ -341,9 +360,9 @@ def read_chrome_cookies_detail(host: str) -> ChromeCookieRead:
     if not host:
         return ChromeCookieRead([], None)
 
-    db_paths = _chrome_cookie_db_paths()
+    db_paths, denied = _chrome_cookie_db_paths()
     if not db_paths:
-        return ChromeCookieRead([], "no_database")
+        return ChromeCookieRead([], "permission_denied" if denied else "no_database")
 
     try:
         from Crypto.Cipher import AES  # noqa: F401 — pycryptodome

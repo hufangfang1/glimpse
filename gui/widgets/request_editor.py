@@ -1615,6 +1615,10 @@ class RequestEditorPanel(QWidget):
             QMessageBox.warning(
                 self, tr("editor.sync_cookie"), tr("editor.cookie.chrome_no_database"))
             return
+        if result.error == "permission_denied":
+            QMessageBox.warning(
+                self, tr("editor.sync_cookie"), tr("editor.cookie.chrome_permission"))
+            return
         if result.error == "decrypt_unavailable":
             QMessageBox.warning(
                 self, tr("editor.sync_cookie"), tr("editor.cookie.chrome_decrypt"))
