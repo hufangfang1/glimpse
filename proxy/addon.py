@@ -66,6 +66,11 @@ class GlimpseAddon:
         # flow.id -> HeldFlow for every currently-paused flow. Keyed per id so N
         # flows can be held simultaneously, each with its own Event.
         self._held: Dict[str, HeldFlow] = {}
+        # Flipped to False by ProxyServer.stop() so the addon stops pushing
+        # flows the instant the user hits Stop, instead of waiting for
+        # mitmproxy's asynchronous shutdown (which leaves in-flight requests
+        # and keep-alive connections firing hooks for hundreds of ms).
+        self._capturing = True
         self._scope_reconnect_generation: int | None = None
         self._scope_reconnect_revision: int | None = None
         self._scope_reconnect_patterns: list[str] = []
@@ -73,6 +78,15 @@ class GlimpseAddon:
 
     def clear(self) -> None:
         self._start_times.clear()
+
+    def pause_capture(self) -> None:
+        """Stop pushing new flows to the queue (called on shutdown).
+
+        Thread-safe: a plain bool assignment is atomic under the GIL, and
+        the hooks read it on the loop thread while stop() writes it on the
+        UI thread. Once False it stays False for the rest of the session.
+        """
+        self._capturing = False
 
     # ------------------------------------------------------------------ #
     # Scope filter
@@ -417,6 +431,8 @@ class GlimpseAddon:
 
     async def request(self, flow: http.HTTPFlow) -> None:
         self._start_times[flow.id] = time.perf_counter()
+        if not self._capturing:
+            return
         try:
             self._confirm_scope_reconnect(flow.request.pretty_host or "")
         except Exception:
@@ -443,6 +459,9 @@ class GlimpseAddon:
             return
 
     async def response(self, flow: http.HTTPFlow) -> None:
+        if not self._capturing:
+            self._start_times.pop(flow.id, None)
+            return
         try:
             url = flow.request.pretty_url
         except Exception:
@@ -465,7 +484,7 @@ class GlimpseAddon:
             self.flow_queue.put(("error", f"Capture error: {exc}"))
 
     def error(self, flow: http.HTTPFlow) -> None:
-        if not self._in_scope(flow):
+        if not self._capturing or not self._in_scope(flow):
             self._start_times.pop(flow.id, None)
             return
         try:
@@ -481,7 +500,7 @@ class GlimpseAddon:
     # ------------------------------------------------------------------ #
 
     def websocket_start(self, flow: http.HTTPFlow) -> None:
-        if not self._in_scope(flow):
+        if not self._capturing or not self._in_scope(flow):
             return
         try:
             self._start_times[flow.id] = time.perf_counter()
@@ -491,7 +510,7 @@ class GlimpseAddon:
             self.flow_queue.put(("error", f"Capture error: {exc}"))
 
     def websocket_message(self, flow: http.HTTPFlow) -> None:
-        if not self._in_scope(flow):
+        if not self._capturing or not self._in_scope(flow):
             return
         assert flow.websocket is not None
         msg = flow.websocket.messages[-1]

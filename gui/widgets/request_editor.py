@@ -84,6 +84,30 @@ _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 _EDITOR_CONTROL_HEIGHT = CONTROL_HEIGHT
 
 
+def _form_value_to_json(value: str):
+    """Preserve JSON-looking form values while keeping ordinary text as text."""
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+
+
+def _form_rows_to_json(rows) -> dict:
+    """Convert enabled form rows to an object, retaining duplicate keys as arrays."""
+    result = {}
+    duplicate_keys = set()
+    for _enabled, key, value in rows:
+        converted = _form_value_to_json(value)
+        if key not in result:
+            result[key] = converted
+        elif key in duplicate_keys:
+            result[key].append(converted)
+        else:
+            result[key] = [result[key], converted]
+            duplicate_keys.add(key)
+    return result
+
+
 class _ComboPopupNoScrollFilter(QObject):
     """Block wheel/trackpad scroll inside combo popups sized to fit all rows."""
 
@@ -216,8 +240,9 @@ class RequestBodyEditor(QWidget):
     grid; JSON mode is a monospace text editor (it also doubles as a raw text
     editor for non-JSON bodies). Both round-trip through a single ``body``
     string plus the request's Content-Type header, so nothing extra needs to be
-    persisted. The two editors keep their own content independently, so toggling
-    modes never discards what the user typed in the other.
+    persisted. Switching from Form to JSON replaces the JSON editor with a
+    pretty-printed conversion of the enabled form rows; switching back keeps
+    the form rows available for further editing.
     """
 
     MODE_FORM = "form"
@@ -287,6 +312,11 @@ class RequestBodyEditor(QWidget):
         if mode not in (self.MODE_FORM, self.MODE_JSON):
             return
         changed = mode != self._mode
+        if changed and not silent and self._mode == self.MODE_FORM and mode == self.MODE_JSON:
+            data = _form_rows_to_json(self._form_table.rows(enabled_only=True))
+            self._json_editor.setPlainText(
+                json.dumps(data, indent=2, ensure_ascii=False)
+            )
         self._mode = mode
         self._apply_mode_ui()
         if changed and not silent:

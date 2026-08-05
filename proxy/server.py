@@ -77,6 +77,12 @@ class ProxyServer:
             return
         self.running = False
         self._stop_event.set()
+        # Immediately stop the addon from pushing new flows. mitmproxy's
+        # shutdown is asynchronous (100ms watcher poll + draining in-flight
+        # connections), so without this the UI keeps showing requests that
+        # arrive on already-established keep-alive connections after Stop.
+        if self._addon is not None:
+            self._addon.pause_capture()
 
     def change_port(self, port: int) -> None:
         """Stop (if running); port change takes effect on next start()."""
